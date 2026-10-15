@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TEC Session Sync",
-  "version": "1.0.2",
-  "description": "Sincroniza a sessão do TEC com seu bot privado na VPS.",
+  "version": "1.1.0",
+  "description": "Sincroniza a sessão do TEC diretamente com o bot Telegram.",
   "permissions": ["cookies", "storage"],
   "host_permissions": [
     "https://www.tecconcursos.com.br/*",
@@ -11,6 +11,6 @@
   ],
   "background": { "service_worker": "background.js" },
   "action": {
-    "default_title": "Abrir sincronização da sessão TEC"
+    "default_title": "Sincronizar sessão do TEC"
   }
 }

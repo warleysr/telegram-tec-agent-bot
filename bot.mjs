@@ -1,34 +1,93 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
+// Carrega variáveis do /etc/telegram-tec-bot.env ou .env local se existirem e não estiverem no ambiente
+const envCandidates = [
+  process.env.ENV_FILE,
+  '/etc/telegram-tec-bot.env',
+  path.resolve('.env'),
+].filter(Boolean);
+
+for (const candidate of envCandidates) {
+  if (fs.existsSync(candidate)) {
+    try {
+      const lines = fs.readFileSync(candidate, 'utf8').split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq > 0) {
+          const k = trimmed.slice(0, eq).trim();
+          const v = trimmed.slice(eq + 1).trim();
+          if (process.env[k] === undefined) process.env[k] = v;
+        }
+      }
+    } catch {}
+  }
+}
+
+function formatLog(level, tag, message, ...extra) {
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const extraStr = extra.length ? ' ' + extra.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(' ') : '';
+  return `[${ts}] [${level}] [${tag}] ${message}${extraStr}`;
+}
+
+export function log(tag, message, ...extra) {
+  console.log(formatLog('INFO', tag, message, ...extra));
+}
+
+export function logWarn(tag, message, ...extra) {
+  console.warn(formatLog('WARN', tag, message, ...extra));
+}
+
+export function logError(tag, message, ...extra) {
+  console.error(formatLog('ERROR', tag, message, ...extra));
+}
+
 const token = process.env.TELEGRAM_BOT_TOKEN;
-if (!token) throw new Error('Defina TELEGRAM_BOT_TOKEN.');
 const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent');
 process.env.TEC_AGENT_HOME ||= tecDir;
 const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
-const { TecClient, Session, AuthError } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
-const { TecApi } = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
-const { importCookies } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
-const session = Session.load(path.join(tecDir, 'session.json'));
-const client = new TecClient({ session });
-const api = new TecApi(client);
-const base = `https://api.telegram.org/bot${token}`;
+
+let TecClient, Session, AuthError, TecApi, importCookies;
+let session, client, api;
+
+try {
+  const clientMod = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
+  TecClient = clientMod.TecClient;
+  Session = clientMod.Session;
+  AuthError = clientMod.AuthError;
+
+  const apiMod = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
+  TecApi = apiMod.TecApi;
+
+  const authMod = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
+  importCookies = authMod.importCookies;
+
+  session = Session.load(path.join(tecDir, 'session.json'));
+  client = new TecClient({ session });
+  api = new TecApi(client);
+} catch (err) {
+  logWarn('INIT', `Aviso ao carregar módulos do tec-agent: ${err.message}`);
+}
+
+const base = token ? `https://api.telegram.org/bot${token}` : null;
 const stateFile = path.resolve(process.env.BOT_DATA_DIR || '.', 'bot-state.json');
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { chats: {}, polls: {} };
 const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
-const loginPairs = new Map();
 let offset = 0;
 
-// Match the paths and query parameters used by the TEC web app.
+// Consulta de pastas do TEC Concursos
 async function tecFolders(tecClient = client) {
   const response = await tecClient.get('/pastas-cadernos/', { buscarSubpastas: true });
   if (!Array.isArray(response.pastas)) throw new Error('O TEC não retornou a lista de pastas. Confira a sessão sincronizada.');
   return response.pastas;
 }
+
+// Consulta questão em posição específica do caderno
 async function tecQuestionFromNotebook(cadernoId, position) {
   const response = await client.get(`/cadernos/${cadernoId}/questoes/${position}`, { atualizarCronometro: false });
   return response.questao;
@@ -40,19 +99,27 @@ function save() {
   fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
   fs.renameSync(tmp, stateFile);
 }
+
 async function tg(method, payload = {}) {
-  const res = await fetch(`${base}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  if (!base) throw new Error('TELEGRAM_BOT_TOKEN não está definido.');
+  const res = await fetch(`${base}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
   const data = await res.json();
   if (!data.ok) throw new Error(data.description || `Telegram ${method} falhou`);
   return data.result;
 }
+
 async function importLogin(cookieText) {
   const trial = new Session(path.join(tecDir, '.session-check.json'));
   try {
     const trialClient = new TecClient({ session: trial });
     importCookies(trialClient, cookieText);
-    try { await tecFolders(trialClient); }
-    catch (error) {
+    try {
+      await tecFolders(trialClient);
+    } catch (error) {
       if (error instanceof AuthError || [401, 403].includes(error.status)) {
         throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
       }
@@ -61,17 +128,22 @@ async function importLogin(cookieText) {
     session.cookies = trial.cookies;
     session.meta = { via: 'chrome-extension-sync', at: new Date().toISOString() };
     session.save();
-  } finally { trial.clear(); }
+  } finally {
+    trial.clear();
+  }
 }
 
 function sessionHelp() {
-  return 'A sessão TEC sincronizada expirou ou foi substituída. Faça login no TEC pelo Chrome com a extensão instalada; ela enviará a sessão nova automaticamente. Se ainda não pareou, envie /login ao bot no privado.';
-}
-function errorText(error) {
-  return error instanceof AuthError ? sessionHelp() : `Erro: ${error.message}`;
+  return 'A sessão TEC sincronizada expirou ou foi substituída. Faça login no TEC pelo Chrome com a extensão instalada ou clique em “Sincronizar agora” na extensão.';
 }
 
-const loginServer = createServer(async (req, res) => {
+function errorText(error) {
+  return (AuthError && error instanceof AuthError) ? sessionHelp() : `Erro: ${error.message}`;
+}
+
+// Servidor HTTP para receber sincronização direta da extensão
+export const loginServer = createServer(async (req, res) => {
+  const clientIp = req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
   const headers = {
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'POST, OPTIONS',
@@ -79,54 +151,67 @@ const loginServer = createServer(async (req, res) => {
     'cache-control': 'no-store',
     'content-type': 'application/json; charset=utf-8',
   };
-  if (req.method === 'OPTIONS' && ['/tec-login/pair', '/tec-login/sync'].includes(req.url)) {
-    res.writeHead(204, headers); return res.end();
+
+  log('HTTP', `${req.method} ${req.url} [IP: ${clientIp}]`);
+
+  if (req.method === 'OPTIONS' && ['/tec-login/sync', '/tec-login/pair'].includes(req.url)) {
+    log('HTTP', `Respondeu CORS preflight 204 para ${req.url}`);
+    res.writeHead(204, headers);
+    return res.end();
   }
-  if (req.method !== 'POST' || !['/tec-login/pair', '/tec-login/sync'].includes(req.url)) {
-    res.writeHead(404, headers); return res.end(JSON.stringify({ error: 'Rota não encontrada.' }));
+
+  if (req.method !== 'POST' || !['/tec-login/sync', '/tec-login/pair'].includes(req.url)) {
+    logWarn('HTTP', `404 Rota não encontrada: ${req.method} ${req.url}`);
+    res.writeHead(404, headers);
+    return res.end(JSON.stringify({ error: 'Rota não encontrada.' }));
   }
+
   try {
     let body = '';
     for await (const chunk of req) {
       body += chunk;
-      if (body.length > 32_000) { res.writeHead(413, headers); return res.end(JSON.stringify({ error: 'Solicitação muito grande.' })); }
-    }
-    const payload = JSON.parse(body);
-    if (req.url === '/tec-login/pair') {
-      const code = String(payload.code || '');
-      const pair = loginPairs.get(code);
-      if (!pair || pair.expiresAt < Date.now()) { res.writeHead(401, headers); return res.end(JSON.stringify({ error: 'Código inválido ou expirado. Envie /login ao bot novamente.' })); }
-      loginPairs.delete(code);
-      const deviceToken = randomBytes(32).toString('base64url');
-      state.extensionTokenHash = createHash('sha256').update(deviceToken).digest('hex');
-      state.extensionPairedAt = new Date().toISOString();
-      save();
-      res.writeHead(200, headers); return res.end(JSON.stringify({ ok: true, token: deviceToken }));
+      if (body.length > 32_000) {
+        logWarn('HTTP', `413 Payload excessivo (${body.length} bytes) de ${clientIp}`);
+        res.writeHead(413, headers);
+        return res.end(JSON.stringify({ error: 'Solicitação muito grande.' }));
+      }
     }
 
-    const suppliedToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const expectedHash = state.extensionTokenHash;
-    const suppliedHash = createHash('sha256').update(suppliedToken).digest();
-    const expected = /^[a-f0-9]{64}$/i.test(expectedHash || '') ? Buffer.from(expectedHash, 'hex') : Buffer.alloc(32);
-    if (suppliedToken.length < 40 || suppliedToken.length > 100 || !timingSafeEqual(suppliedHash, expected)) {
-      res.writeHead(401, headers); return res.end(JSON.stringify({ error: 'Extensão não pareada. Envie /login ao bot e pareie novamente.' }));
+    const payload = JSON.parse(body || '{}');
+
+    // Suporte retrocompatível para /tec-login/pair se alguma extensão antiga chamar
+    if (req.url === '/tec-login/pair') {
+      log('HTTP', `POST /tec-login/pair recebido de ${clientIp} (pareamento desnecessário, respondendo OK)`);
+      res.writeHead(200, headers);
+      return res.end(JSON.stringify({ ok: true, message: 'Pareamento não é mais necessário. Sincronização direta ativa.' }));
     }
-    if (typeof payload.cookies !== 'string' || payload.cookies.length > 24_000) {
-      res.writeHead(400, headers); return res.end(JSON.stringify({ error: 'Cookies ausentes ou inválidos.' }));
+
+    if (req.url === '/tec-login/sync') {
+      log('SYNC', `Recebendo cookies para sincronização direta [IP: ${clientIp}]`);
+      if (typeof payload.cookies !== 'string' || payload.cookies.length > 24_000) {
+        logError('SYNC', 'Payload de cookies ausente ou inválido');
+        res.writeHead(400, headers);
+        return res.end(JSON.stringify({ error: 'Cookies ausentes ou inválidos.' }));
+      }
+
+      await importLogin(payload.cookies);
+      state.extensionSyncedAt = new Date().toISOString();
+      save();
+      log('SYNC', `Sessão TEC validada e sincronizada com sucesso em ${state.extensionSyncedAt}`);
+      res.writeHead(200, headers);
+      return res.end(JSON.stringify({ ok: true, syncedAt: state.extensionSyncedAt }));
     }
-    await importLogin(payload.cookies);
-    state.extensionSyncedAt = new Date().toISOString();
-    save();
-    res.writeHead(200, headers); return res.end(JSON.stringify({ ok: true, syncedAt: state.extensionSyncedAt }));
   } catch (error) {
-    console.error(`Sincronização TEC falhou: ${error.message}`);
-    res.writeHead(401, headers); return res.end(JSON.stringify({ error: error.message || 'Não foi possível validar a sessão TEC.' }));
+    logError('SYNC', `Falha ao validar sessão TEC de ${clientIp}: ${error.message}`);
+    res.writeHead(401, headers);
+    return res.end(JSON.stringify({ error: error.message || 'Não foi possível validar a sessão TEC.' }));
   }
 });
+
 const chatKey = (id) => String(id);
-function privateChat(chat) { return chat.type === 'private'; }
 function compact(text = '') { return String(text).replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]*\n+/g, '\n').replace(/\n{2,}/g, '\n').trim(); }
 function escapeHtml(text = '') { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
 function cadernoId(input) {
   let u;
   try { u = new URL(input); } catch { throw new Error('Envie o link completo do caderno do TEC.'); }
@@ -137,47 +222,140 @@ function cadernoId(input) {
   if (short) throw new Error('Links curtos (/s/ ou /caderno/) ainda não podem ser convertidos pela API do tec-agent. Envie o link direto /questoes/cadernos/ID.');
   throw new Error('Não encontrei o ID do caderno no link. Use /questoes/cadernos/ID.');
 }
+
+/** Extração avançada de gabarito a partir do comentário do professor quando a API não retorna estruturado */
+export function extrairGabaritoComentario(comentarioText, tipo, alternativas = []) {
+  if (!comentarioText) return null;
+  const isCertoErrado = tipo === 'CERTO_ERRADO' || (alternativas.length === 2 && /certo/i.test(alternativas[0]) && /errado/i.test(alternativas[1]));
+
+  // 1. Padrão "Gabarito: Letra A", "Gabarito: Certo", "Gabarito: ERRADO", "Gabarito: B", "Resposta: E"
+  const m1 = /(?:gabarito|resposta|opção|alternativa correta)\s*(?:oficial|preliminar|definitivo|do professor)?\s*(?:é|seria|foi)?\s*(?:a\s*)?[:\s\-–—]\s*(?:letra\s*)?([a-j]|certo|errado)\b/i.exec(comentarioText);
+  if (m1) {
+    const val = m1[1].trim();
+    if (isCertoErrado) {
+      if (/^c/i.test(val)) return 'Certo';
+      if (/^e/i.test(val)) return 'Errado';
+    }
+    return val.toUpperCase();
+  }
+
+  // 2. Padrão "Letra X é a correta", "Alternativa Y está certa"
+  const m2 = /(?:letra|alternativa)\s*([a-j])\s*(?:é a|está)?\s*(?:correta|certa)\b/i.exec(comentarioText);
+  if (m2) return m2[1].toUpperCase();
+
+  // 3. Padrão "X – <texto>\n\nCerta: ..."
+  const m3 = /([a-j])\s*[–\-—:]\s*[^\n]+\n+\s*(?:certa|correta)\b/i.exec(comentarioText);
+  if (m3) return m3[1].toUpperCase();
+
+  // 4. Padrões específicos para Certo / Errado
+  if (isCertoErrado) {
+    const mCE1 = /(?:portanto|logo|assim|conclui-se que|dessa forma)[,\s]+(?:o\s*)?(?:item|assertiva|afirmativa|proposição)?\s*(?:é|está|resta)?\s*(certo|errado|correto|correta|errada|incorreto|incorreta)\b/i.exec(comentarioText);
+    if (mCE1) {
+      return /^(certo|corret)/i.test(mCE1[1]) ? 'Certo' : 'Errado';
+    }
+
+    const mCE2 = /\b(?:item|assertiva|afirmativa|proposição)\s*(?:é|está|resta)?\s*(certo|errado|correto|correta|errada|incorreto|incorreta)\b/i.exec(comentarioText);
+    if (mCE2) {
+      return /^(certo|corret)/i.test(mCE2[1]) ? 'Certo' : 'Errado';
+    }
+  }
+
+  return null;
+}
+
+/** Mapeia com segurança o gabarito identificado para o índice da opção da enquete */
+export function resolveGabaritoIndex(q, options = []) {
+  if (!q) return -1;
+  const isCertoErrado = q.tipo === 'CERTO_ERRADO' || (options.length === 2 && /certo/i.test(options[0]) && /errado/i.test(options[1]));
+  const gab = q.gabarito;
+
+  if (isCertoErrado) {
+    if (typeof gab === 'string') {
+      const g = gab.trim().toUpperCase();
+      if (['C', 'CERTO', 'CORRETO', 'CORRETA', 'VERDADEIRO', 'V', 'A'].includes(g)) return 0;
+      if (['E', 'ERRADO', 'INCORRETO', 'INCORRETA', 'FALSO', 'F', 'B'].includes(g)) return 1;
+    }
+    if (gab === 1) return 0;
+    if (gab === 2) return 1;
+  }
+
+  // Correspondência textual direta com o texto da alternativa
+  if (gab) {
+    const textIdx = options.findIndex(x => x && String(x).trim().toLowerCase() === String(gab).trim().toLowerCase());
+    if (textIdx >= 0) return textIdx;
+  }
+
+  // Correspondência por letra A-J
+  if (typeof gab === 'string') {
+    const letter = gab.trim().toUpperCase();
+    if (/^[A-J]$/.test(letter)) {
+      const idx = letter.charCodeAt(0) - 65;
+      if (idx >= 0 && idx < options.length) return idx;
+    }
+  }
+
+  // Correspondência por índice numérico 1-based
+  const num = typeof gab === 'number' ? gab : /^\d+$/.test(String(gab ?? '').trim()) ? Number(gab) : NaN;
+  if (Number.isInteger(num) && num >= 1 && num <= options.length) {
+    return num - 1;
+  }
+
+  return -1;
+}
+
 async function loadQuestion(cid, n) {
   const item = await tecQuestionFromNotebook(cid, n);
   if (!item) return null;
   const id = item.idQuestao ?? item.id ?? item.questaoId;
   if (!id) throw new Error('O TEC retornou uma questão sem ID.');
+
   const [q, raw] = await Promise.all([
     api.questao(id, { comentario: true }),
-    api.questaoBruta(id),
+    api.questaoBruta(id).catch(() => null),
   ]);
 
-  // Só usamos o campo estruturado da API. O tec-agent também tenta inferir a
-  // resposta pelo comentário do professor; essa inferência pode confundir uma
-  // conclusão sobre o texto-base com o gabarito do item.
-  q.gabarito = null;
-  // O TEC pode incluir o gabarito estruturado na resposta do caderno ou na
-  // resposta da questão. Não use api.questao().gabarito: ele também pode vir
-  // de inferência sobre o comentário do professor.
+  const opcoes = q.alternativas?.length
+    ? q.alternativas
+    : q.tipo === 'CERTO_ERRADO' ? ['Certo', 'Errado'] : [];
+
+  // 1. Tenta gabarito estruturado da API (se exposto pelo TEC no raw ou no item)
   const numeroRaw = raw?.numeroAlternativaCorreta ?? item.numeroAlternativaCorreta;
   const numero = typeof numeroRaw === 'number'
     ? numeroRaw
     : /^\d+$/.test(String(numeroRaw ?? '')) ? Number(numeroRaw) : NaN;
   const letraRaw = String(raw?.alternativaCorreta ?? item.alternativaCorreta ?? '').trim().toUpperCase();
-  // Em algumas questões C/E a API omite o array de alternativas; o Telegram
-  // já usa exatamente estas duas opções como fallback em showQuestion().
-  const opcoes = q.alternativas?.length
-    ? q.alternativas
-    : q.tipo === 'CERTO_ERRADO' ? ['Certo', 'Errado'] : [];
+
   if (Number.isInteger(numero) && numero > 0 && numero <= opcoes.length) {
     q.gabarito = q.tipo === 'CERTO_ERRADO'
-      ? opcoes[numero - 1]
+      ? (numero === 1 ? 'Certo' : 'Errado')
       : String.fromCharCode(64 + numero);
-  } else if (/^[A-J]$/.test(letraRaw) && letraRaw.charCodeAt(0) - 65 < opcoes.length) {
+  } else if (/^[A-J]$/.test(letraRaw) && (letraRaw.charCodeAt(0) - 65 < opcoes.length || q.tipo === 'CERTO_ERRADO')) {
     q.gabarito = q.tipo === 'CERTO_ERRADO'
-      ? opcoes[letraRaw.charCodeAt(0) - 65]
+      ? (letraRaw === 'C' || letraRaw === 'A' ? 'Certo' : 'Errado')
       : letraRaw;
   } else if (q.tipo === 'CERTO_ERRADO' && /^(CERTO|ERRADO)$/.test(letraRaw)) {
     q.gabarito = letraRaw[0] + letraRaw.slice(1).toLowerCase();
   }
+
+  // 2. Se não houver gabarito estruturado em raw/item, preserva o gabarito extraído pelo tec-agent
+  // (que já analisa api.questao() e os comentários do professor)
+
+  // 3. Se ainda assim estiver sem gabarito, executa fallback avançado de extração pelo comentário
+  if (!q.gabarito && q.comentario) {
+    q.gabarito = extrairGabaritoComentario(q.comentario, q.tipo, opcoes);
+  }
+
+  if (q.gabarito) {
+    log('QUESTION', `Questão #${id} (nº ${n}): Gabarito identificado como "${q.gabarito}" (tipo: ${q.tipo || 'DESCONHECIDO'})`);
+  } else {
+    logWarn('QUESTION', `Questão #${id} (nº ${n}): Nenhum gabarito identificado no comentário ou na API`);
+  }
+
   return q;
 }
+
 function totalFrom(item) { return Number(item?.quantidadeItens ?? item?.totalQuestoes ?? item?.quantidade ?? 0); }
+
 async function findTotal(cid) {
   const folders = await tecFolders();
   for (const folder of folders) {
@@ -190,6 +368,7 @@ async function findTotal(cid) {
   }
   return 0;
 }
+
 async function listAll(folderId, subfolderId) {
   const all = [], seen = new Set();
   for (let page = 1; ; page++) {
@@ -199,7 +378,9 @@ async function listAll(folderId, subfolderId) {
     all.push(...items);
   }
 }
+
 function button(text, callback_data) { return { text: String(text).slice(0, 60), callback_data }; }
+
 async function browse(chatId, messageId, where = { type: 'root', page: 0 }) {
   const folders = await tecFolders();
   if (!folders.length) throw new Error('Não encontrei pastas na sua conta TEC.');
@@ -244,6 +425,7 @@ async function browse(chatId, messageId, where = { type: 'root', page: 0 }) {
   if (messageId) await tg('editMessageText', payload);
   else await tg('sendMessage', { chat_id: chatId, text, reply_markup: payload.reply_markup });
 }
+
 async function showFolders(chatId, messageId, page = 0) {
   const folders = await tecFolders();
   const pageSize = 12, pages = Math.max(1, Math.ceil(folders.length / pageSize));
@@ -259,9 +441,11 @@ async function showFolders(chatId, messageId, page = 0) {
   if (messageId) await tg('editMessageText', { ...payload, message_id: messageId });
   else await tg('sendMessage', payload);
 }
+
 function chatState(chatId) { return state.chats[chatKey(chatId)] ||= {}; }
 function scoreKey(chatId, userId, cid) { return `${chatId}:${userId}:${cid}`; }
 function solvedSet(chatId, userId, cid) { return new Set(state.answers?.[scoreKey(chatId, userId, cid)] || []); }
+
 async function nextIndex(cs, chatId, userId, mode, skipped = new Set()) {
   const n = cs.total;
   const done = solvedSet(chatId, userId, cs.cadernoId);
@@ -271,30 +455,51 @@ async function nextIndex(cs, chatId, userId, mode, skipped = new Set()) {
   }
   return available[0] ?? null;
 }
+
 async function showQuestion(chat, user, mode = 'next') {
   const cs = chatState(chat.id);
   if (!cs.cadernoId || !cs.total) throw new Error('Primeiro envie /caderno seguido do link direto do caderno.');
-  // A lista antiga state.unavailable era persistente e global ao caderno. Se
-  // a extração do gabarito falhasse uma vez, as questões ficavam ignoradas
-  // para sempre, inclusive depois de uma correção. Agora o pulo vale só nesta
-  // busca e as questões serão reavaliadas no próximo /proxima ou /aleatoria.
+
+  log('QUIZ', `Buscando questão (${mode}) para chat ${chat.id}, usuário ${user.id} no caderno ${cs.cadernoId} (total: ${cs.total})`);
   const ignoradasNestaBusca = new Set();
   let n, q, options, correctId;
+
   while ((n = await nextIndex(cs, chat.id, user.id, mode, ignoradasNestaBusca)) !== null) {
     q = await loadQuestion(cs.cadernoId, n);
-    if (!q) throw new Error(`Não consegui carregar a questão ${n} do caderno. Confira o link e seu login do TEC.`);
-    options = q.alternativas?.length ? q.alternativas : ['Certo', 'Errado'];
-    correctId = options.findIndex((x, i) => x === q.gabarito || String(q.gabarito).toUpperCase() === String.fromCharCode(65 + i));
-    if (correctId >= 0) break;
+    if (!q) {
+      logError('QUIZ', `Não foi possível carregar a questão nº ${n} do caderno ${cs.cadernoId}`);
+      throw new Error(`Não consegui carregar a questão ${n} do caderno. Confira o link e seu login do TEC.`);
+    }
 
+    options = q.alternativas?.length ? q.alternativas : ['Certo', 'Errado'];
+    correctId = resolveGabaritoIndex(q, options);
+
+    if (correctId >= 0) {
+      log('QUIZ', `Questão nº ${n} (ID #${q.id}) selecionada: gabarito "${q.gabarito}" -> opção [${correctId}] "${options[correctId]}"`);
+      break;
+    }
+
+    logWarn('QUIZ', `Questão nº ${n} (ID #${q.id}) sem gabarito válido identificado. Pulando nesta busca...`);
     ignoradasNestaBusca.add(n);
   }
+
   if (n === null) {
     const respondidas = solvedSet(chat.id, user.id, cs.cadernoId).size;
-    const resumo = ignoradasNestaBusca.size ? ` ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; elas serão verificadas novamente na próxima.` : '';
-    return tg('sendMessage', { chat_id: chat.id, text: `Não há questões com gabarito disponíveis agora. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}` });
+    const resumo = ignoradasNestaBusca.size ? ` ${ignoradasNestaBusca.size} questão(ões) sem gabarito disponível foram puladas nesta busca; elas serão verificadas novamente na próxima.` : '';
+    log('QUIZ', `Nenhuma questão disponível para chat ${chat.id} (${respondidas}/${cs.total} respondidas, ${ignoradasNestaBusca.size} puladas)`);
+    return tg('sendMessage', {
+      chat_id: chat.id,
+      text: `Não há questões com gabarito disponíveis agora. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}`
+    });
   }
-  if (ignoradasNestaBusca.size) await tg('sendMessage', { chat_id: chat.id, text: `⏭️ ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; serão reavaliadas depois.` });
+
+  if (ignoradasNestaBusca.size) {
+    await tg('sendMessage', {
+      chat_id: chat.id,
+      text: `⏭️ ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; serão reavaliadas depois.`
+    });
+  }
+
   const description = [
     q.banca,
     [q.orgao || q.orgaoNome, q.ano].filter(Boolean).join(' '),
@@ -302,70 +507,125 @@ async function showQuestion(chat, user, mode = 'next') {
     q.prova,
     q.numero ? `Questão ${q.numero}` : null,
   ].filter(Boolean).join(' - ') || `Questão TEC #${q.id}`;
+
   const prompt = compact(q.enunciado || '(sem enunciado)');
   const parts = prompt.match(/[\s\S]{1,3800}/g) || [''];
   for (let i = 0; i < parts.length; i++) {
-    await tg('sendMessage', { chat_id: chat.id, text: `${i === 0 ? `<b>${escapeHtml(description)}</b>\n` : ''}${escapeHtml(parts[i])}`, parse_mode: 'HTML' });
+    await tg('sendMessage', {
+      chat_id: chat.id,
+      text: `${i === 0 ? `<b>${escapeHtml(description)}</b>\n` : ''}${escapeHtml(parts[i])}`,
+      parse_mode: 'HTML'
+    });
   }
-  const poll = await tg('sendPoll', { chat_id: chat.id, question: `Questão TEC #${q.id} — ${n}/${cs.total}`, options: options.map((x, i) => ({ text: `${String.fromCharCode(65 + i)}. ${x}`.slice(0, 100) })), type: 'quiz', is_anonymous: false, correct_option_id: correctId, explanation: 'Use os botões abaixo para ver o comentário ou escolher outra questão.', explanation_parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'Ver comentário', callback_data: `c:${q.id}` }], [{ text: 'Próxima', callback_data: 'q:n' }, { text: 'Aleatória', callback_data: 'q:r' }]] } });
+
+  const poll = await tg('sendPoll', {
+    chat_id: chat.id,
+    question: `Questão TEC #${q.id} — ${n}/${cs.total}`,
+    options: options.map((x, i) => ({ text: `${String.fromCharCode(65 + i)}. ${x}`.slice(0, 100) })),
+    type: 'quiz',
+    is_anonymous: false,
+    correct_option_id: correctId,
+    explanation: 'Use os botões abaixo para ver o comentário ou escolher outra questão.',
+    explanation_parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: 'Ver comentário', callback_data: `c:${q.id}` }],
+        [{ text: 'Próxima', callback_data: 'q:n' }, { text: 'Aleatória', callback_data: 'q:r' }]
+      ]
+    }
+  });
+
   state.polls[poll.poll.id] = { chatId: chat.id, cid: cs.cadernoId, index: n, qid: q.id, answer: correctId };
   save();
+  log('QUIZ', `Poll enviada com sucesso (Poll ID: ${poll.poll.id}) para chat ${chat.id}`);
 }
+
 async function handleMessage(m) {
   if (!m.text) return;
   const [cmd, ...args] = m.text.trim().split(/\s+/);
   const chat = m.chat, user = m.from;
+
+  log('MSG', `Comando "${cmd}" recebido de ${user.id} (@${user.username || user.first_name}) no chat ${chat.id}`);
+
   try {
-    if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
-    if (cmd === '/id' || cmd.startsWith('/id@')) return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
+    if (cmd === '/start' || cmd.startsWith('/start@')) {
+      return tg('sendMessage', {
+        chat_id: chat.id,
+        text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. A sincronização de sessão é direta via extensão no Chrome.'
+      });
+    }
+    if (cmd === '/id' || cmd.startsWith('/id@')) {
+      return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
+    }
     if (cmd === '/login' || cmd.startsWith('/login@')) {
-      if (!admins.has(String(user.id))) throw new Error('Este comando é restrito aos administradores configurados na VPS.');
-      if (!privateChat(chat)) throw new Error('Por segurança, envie /login em uma conversa privada com o bot.');
-      for (const [oldCode, pending] of loginPairs) if (pending.userId === String(user.id)) loginPairs.delete(oldCode);
-      const code = randomBytes(18).toString('base64url');
-      const pair = { userId: String(user.id), chatId: String(chat.id), expiresAt: Date.now() + 5 * 60_000 };
-      loginPairs.set(code, pair);
-      setTimeout(() => {
-        if (loginPairs.get(code) === pair && Date.now() >= pair.expiresAt) {
-          loginPairs.delete(code);
-          void tg('sendMessage', { chat_id: chat.id, text: 'O código de pareamento da extensão expirou. Envie /login novamente.' }).catch(() => {});
-        }
-      }, 5 * 60_000).unref();
-      return tg('sendMessage', { chat_id: chat.id, text: `Código para parear a extensão TEC: ${code}\n\nNo Chrome do PC, abra TEC Session Sync e cole este código uma vez. Depois disso, novos logins no TEC serão sincronizados automaticamente com a VPS. O código expira em 5 minutos.` });
+      log('CMD', `/login: Informando sincronização direta sem pareamento`);
+      return tg('sendMessage', {
+        chat_id: chat.id,
+        text: 'A sincronização da extensão TEC agora é direta e automática! Não é necessário nenhum código de pareamento.\n\nBasta instalar a extensão no Chrome/Helium e fazer login no TEC Concursos (ou clicar em "Sincronizar agora" na extensão).'
+      });
     }
     if (cmd === '/caderno' || cmd.startsWith('/caderno@')) {
-      const id = cadernoId(args.join(' '));
+      const link = args.join(' ');
+      const id = cadernoId(link);
+      log('CMD', `/caderno: Identificado ID ${id}. Buscando total de questões...`);
       const total = await findTotal(id);
       if (!total) throw new Error('Não localizei a quantidade de questões. Confira se o caderno pertence à conta autenticada do tec-agent e se o link contém o ID numérico.');
-      Object.assign(chatState(chat.id), { cadernoId: id, total, link: args.join(' ') }); save();
+      Object.assign(chatState(chat.id), { cadernoId: id, total, link });
+      save();
+      log('CMD', `/caderno: Caderno ${id} salvo para o chat ${chat.id} com ${total} questões.`);
       return tg('sendMessage', { chat_id: chat.id, text: `Caderno carregado (${total} questões). Use /proxima ou /aleatoria.` });
     }
-    if (cmd === '/lista' || cmd.startsWith('/lista@')) return browse(chat.id, null);
-    if (cmd === '/proxima' || cmd.startsWith('/proxima@')) return showQuestion(chat, user, 'next');
-    if (cmd === '/aleatoria' || cmd.startsWith('/aleatoria@')) return showQuestion(chat, user, 'random');
+    if (cmd === '/lista' || cmd.startsWith('/lista@')) {
+      log('CMD', `/lista: Abrindo navegação de pastas para o chat ${chat.id}`);
+      return browse(chat.id, null);
+    }
+    if (cmd === '/proxima' || cmd.startsWith('/proxima@')) {
+      log('CMD', `/proxima solicitado no chat ${chat.id}`);
+      return showQuestion(chat, user, 'next');
+    }
+    if (cmd === '/aleatoria' || cmd.startsWith('/aleatoria@')) {
+      log('CMD', `/aleatoria solicitado no chat ${chat.id}`);
+      return showQuestion(chat, user, 'random');
+    }
     if (cmd === '/status' || cmd.startsWith('/status@')) {
-      const cs = chatState(chat.id); const done = cs.cadernoId ? solvedSet(chat.id, user.id, cs.cadernoId).size : 0;
-      return tg('sendMessage', { chat_id: chat.id, text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.` : 'Nenhum caderno carregado neste chat.' });
+      const cs = chatState(chat.id);
+      const done = cs.cadernoId ? solvedSet(chat.id, user.id, cs.cadernoId).size : 0;
+      log('CMD', `/status solicitado no chat ${chat.id}: ${done}/${cs.total || 0}`);
+      return tg('sendMessage', {
+        chat_id: chat.id,
+        text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.` : 'Nenhum caderno carregado neste chat.'
+      });
     }
   } catch (e) {
+    logError('CMD', `Erro ao processar "${cmd}": ${e.message}`);
     await tg('sendMessage', { chat_id: chat.id, text: errorText(e) });
   }
 }
+
 async function handleUpdate(u) {
   if (u.message) await handleMessage(u.message);
+
   if (u.poll_answer) {
     const pa = u.poll_answer, p = state.polls[pa.poll_id];
     if (p && pa.user && pa.option_ids?.length) {
       const key = scoreKey(p.chatId, pa.user.id, p.cid);
-      state.answers ||= {}; state.answers[key] ||= [];
+      state.answers ||= {};
+      state.answers[key] ||= [];
       if (!state.answers[key].includes(p.index)) state.answers[key].push(p.index);
       save();
       const ok = pa.option_ids[0] === p.answer;
-      await tg('sendMessage', { chat_id: p.chatId, text: `${pa.user.first_name || 'Usuário'}: ${ok ? '✅ Acertou!' : '❌ Errou.'}` });
+      log('POLL_ANSWER', `Usuário ${pa.user.id} (${pa.user.first_name}) respondeu enquete ${pa.poll_id}. Escolheu: ${pa.option_ids[0]}, Gabarito: ${p.answer} -> ${ok ? 'ACERTOU (✅)' : 'ERROU (❌)'}`);
+      await tg('sendMessage', {
+        chat_id: p.chatId,
+        text: `${pa.user.first_name || 'Usuário'}: ${ok ? '✅ Acertou!' : '❌ Errou.'}`
+      });
     }
   }
+
   if (u.callback_query) {
     const cb = u.callback_query;
+    log('CALLBACK', `Callback query recebido: "${cb.data}" de ${cb.from.id} no chat ${cb.message?.chat.id}`);
+
     if (cb.data?.startsWith('b:')) {
       try {
         const [_, action, a, b, c] = cb.data.split(':');
@@ -383,35 +643,81 @@ async function handleUpdate(u) {
           if (!item) throw new Error('Não encontrei esse caderno na sua conta TEC.');
           const total = totalFrom(item);
           if (!total) throw new Error('O TEC não informou quantas questões há neste caderno.');
-          Object.assign(chatState(cb.message.chat.id), { cadernoId: String(item.id), total, name: item.nome }); save();
-          await tg('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `Caderno selecionado: ${item.nome}\n${total} questões. Use /proxima ou /aleatoria.` });
-        } else if (action === 'nop') { /* apenas indicador da página */ }
+          Object.assign(chatState(cb.message.chat.id), { cadernoId: String(item.id), total, name: item.nome });
+          save();
+          log('CALLBACK', `Caderno selecionado: ${item.nome} (${item.id}) com ${total} questões`);
+          await tg('editMessageText', {
+            chat_id: cb.message.chat.id,
+            message_id: cb.message.message_id,
+            text: `Caderno selecionado: ${item.nome}\n${total} questões. Use /proxima ou /aleatoria.`
+          });
+        } else if (action === 'nop') { /* indicador de página */ }
         await tg('answerCallbackQuery', { callback_query_id: cb.id });
-      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true }); }
+      } catch (e) {
+        logError('CALLBACK', `Erro ao processar callback de navegação: ${e.message}`);
+        await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true });
+      }
     } else if (cb.data?.startsWith('c:')) {
       try {
+        log('COMMENT', `Buscando comentário da questão #${cb.data.slice(2)}...`);
         const q = await api.questao(cb.data.slice(2), { comentario: true });
         const body = q.comentario || 'O TEC não disponibilizou comentário para esta questão.';
         const chunks = body.match(/[\s\S]{1,3800}/g) || ['Sem comentário.'];
-        for (const chunk of chunks) await tg('sendMessage', { chat_id: cb.message.chat.id, text: chunk, reply_to_message_id: cb.message.message_id });
+        for (const chunk of chunks) {
+          await tg('sendMessage', { chat_id: cb.message.chat.id, text: chunk, reply_to_message_id: cb.message.message_id });
+        }
         await tg('answerCallbackQuery', { callback_query_id: cb.id });
-      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true }); }
+      } catch (e) {
+        logError('COMMENT', `Erro ao buscar comentário: ${e.message}`);
+        await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true });
+      }
     } else if (cb.data === 'q:n' || cb.data === 'q:r') {
       await tg('answerCallbackQuery', { callback_query_id: cb.id });
-      try { await showQuestion(cb.message.chat, cb.from, cb.data === 'q:n' ? 'next' : 'random'); }
-      catch (e) { await tg('sendMessage', { chat_id: cb.message.chat.id, text: errorText(e) }); }
+      try {
+        await showQuestion(cb.message.chat, cb.from, cb.data === 'q:n' ? 'next' : 'random');
+      } catch (e) {
+        logError('QUIZ', `Erro ao carregar questão via botão: ${e.message}`);
+        await tg('sendMessage', { chat_id: cb.message.chat.id, text: errorText(e) });
+      }
     }
   }
 }
-await new Promise((resolve, reject) => {
-  loginServer.once('error', reject);
-  loginServer.listen(Number(process.env.BOT_LOGIN_PORT || 8088), '127.0.0.1', resolve);
-});
-console.log(`Bot iniciado. Callback TEC em 127.0.0.1:${Number(process.env.BOT_LOGIN_PORT || 8088)}. Estado: ${stateFile}`);
-while (true) {
-  try {
-    const updates = await tg('getUpdates', { offset, timeout: 50, allowed_updates: ['message', 'poll_answer', 'callback_query'] });
-    for (const u of updates) { offset = u.update_id + 1; await handleUpdate(u); }
-  } catch (e) { console.error(e.message); await new Promise(r => setTimeout(r, 3000)); }
+
+export async function start() {
+  if (!token) throw new Error('Defina TELEGRAM_BOT_TOKEN.');
+  const loginPort = Number(process.env.BOT_LOGIN_PORT || 8088);
+  await new Promise((resolve, reject) => {
+    loginServer.once('error', reject);
+    loginServer.listen(loginPort, '127.0.0.1', resolve);
+  });
+
+  log('STARTUP', `Bot Telegram TEC iniciado com sucesso.`);
+  log('STARTUP', `Node.js: ${process.version} | PID: ${process.pid} | Plataforma: ${process.platform}`);
+  log('STARTUP', `Servidor HTTP de sincronização escutando em 127.0.0.1:${loginPort}`);
+  log('STARTUP', `Arquivo de estado do bot: ${stateFile}`);
+  log('STARTUP', `Iniciando loop de polling do Telegram...`);
+
+  while (true) {
+    try {
+      const updates = await tg('getUpdates', { offset, timeout: 50, allowed_updates: ['message', 'poll_answer', 'callback_query'] });
+      if (updates.length > 0) {
+        log('POLL', `Recebidas ${updates.length} atualização(ões) do Telegram`);
+      }
+      for (const u of updates) {
+        offset = u.update_id + 1;
+        await handleUpdate(u);
+      }
+    } catch (e) {
+      logError('POLL', `Erro no polling do Telegram: ${e.message}`);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
 }
 
+const isMain = Boolean(process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href);
+if (isMain) {
+  start().catch((err) => {
+    logError('FATAL', `Falha crítica ao executar o bot: ${err.message}`);
+    process.exit(1);
+  });
+}

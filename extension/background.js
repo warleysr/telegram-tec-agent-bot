@@ -15,12 +15,10 @@ async function currentCookieHeader() {
 }
 
 async function syncSession() {
-  const { deviceToken } = await chrome.storage.local.get('deviceToken');
-  if (!deviceToken) throw new Error('Extensão ainda não pareada. Use o código enviado pelo bot em /login.');
   const cookies = await currentCookieHeader();
   const response = await fetch(`${API_BASE}/sync`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${deviceToken}` },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cookies }),
   });
   const result = await response.json().catch(() => ({}));
@@ -61,13 +59,13 @@ chrome.cookies.onChanged.addListener(({ cookie }) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'syncNow') return;
-  syncSession().then(syncedAt => sendResponse({ ok: true, syncedAt }))
+  syncSession()
+    .then(syncedAt => sendResponse({ ok: true, syncedAt }))
     .catch(error => sendResponse({ ok: false, error: error.message }));
   return true;
 });
 
-// Use a regular extension tab instead of the toolbar popup. This is more reliable
-// in Chromium forks and also keeps the pairing form usable in narrow popups.
+// Abre aba de status/sincronização ao clicar no ícone da extensão
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
 });
