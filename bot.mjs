@@ -108,7 +108,8 @@ async function startLoginTunnel(password) {
   const display = process.env.TEC_LOGIN_DISPLAY || ':99';
   const children = [];
   try {
-    children.push(await managedProcess('Xvfb', [display, '-screen', '0', '1440x1000x24', '-nolisten', 'tcp', '-ac']));
+    // A tela em retrato ocupa melhor o espaço disponível no Telegram móvel.
+    children.push(await managedProcess('Xvfb', [display, '-screen', '0', '900x1600x24', '-nolisten', 'tcp', '-ac']));
     await new Promise(resolve => setTimeout(resolve, 500));
     children.push(await managedProcess('x11vnc', ['-display', display, '-forever', '-shared', '-rfbport', '5900', '-localhost', '-passwd', password, '-noxdamage', '-verbose']));
     const websockifyBin = process.env.BOT_WEBSOCKIFY_BIN || 'websockify';

@@ -18,7 +18,7 @@ O script pedirá:
 2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
 3. A URL HTTPS pública que será usada no login, terminada em `/tec-login` (por exemplo, `https://bot.seudominio.com/tec-login`).
 
-O instalador copia o executável Node para a pasta do serviço (inclusive quando o Node veio do NVM em `/root`), prepara Chromium, Xvfb e x11vnc, e instala o Websockify 0.13.0 em um virtualenv isolado. Isso evita o erro do pacote Websockify 0.9.0 do Ubuntu 20.04 com versões atuais do Python. Também configura o proxy HTTPS automaticamente. No Nginx, cria um host virtual e solicita o certificado; no Apache, adiciona as rotas ao virtual host HTTPS existente e reutiliza o certificado instalado. Se nenhum deles estiver ativo, instala e configura o Caddy, que emite o certificado automaticamente. Para emissão automática, o DNS do domínio deve apontar para a VPS e as portas 80 e 443 precisam estar acessíveis. Depois, envie `/login` ao bot no privado.
+O instalador copia o executável Node para a pasta do serviço (inclusive quando o Node veio do NVM em `/root`), prepara Chromium e x11vnc, instala o Websockify 0.13.0 em um virtualenv isolado e abre o Chrome em modo quiosque numa tela vertical, mais adequada ao celular. Isso evita o erro do pacote Websockify 0.9.0 do Ubuntu 20.04 com versões atuais do Python. Também configura o proxy HTTPS automaticamente. No Nginx, cria um host virtual e solicita o certificado; no Apache, adiciona as rotas ao virtual host HTTPS existente e reutiliza o certificado instalado. Se nenhum deles estiver ativo, instala e configura o Caddy, que emite o certificado automaticamente. Para emissão automática, o DNS do domínio deve apontar para a VPS e as portas 80 e 443 precisam estar acessíveis. Depois, envie `/login` ao bot no privado.
 
 Depois, acompanhe o serviço com:
 
@@ -67,6 +67,12 @@ sudo python3 -m venv /opt/telegram-tec-bot/venv
 sudo /opt/telegram-tec-bot/venv/bin/pip install --disable-pip-version-check --no-deps 'websockify==0.13.0'
 sudo install -m 0644 bot.mjs /opt/telegram-tec-bot/bot.mjs
 sudo sh -c 'grep -q "^BOT_WEBSOCKIFY_BIN=" /etc/telegram-tec-bot.env || echo "BOT_WEBSOCKIFY_BIN=/opt/telegram-tec-bot/venv/bin/websockify" >> /etc/telegram-tec-bot.env'
+sudo tee /opt/telegram-tec-bot/chrome-wrapper >/dev/null <<'EOF'
+#!/usr/bin/env bash
+exec /opt/google/chrome/chrome --kiosk --window-size=900,1600 "$@"
+EOF
+sudo chmod 0755 /opt/telegram-tec-bot/chrome-wrapper
+sudo sh -c 'grep -q "^CHROME_PATH=" /etc/telegram-tec-bot.env || echo "CHROME_PATH=/opt/telegram-tec-bot/chrome-wrapper" >> /etc/telegram-tec-bot.env'
 sudo systemctl restart telegram-tec-bot
 ```
 
