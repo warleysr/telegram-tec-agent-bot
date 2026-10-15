@@ -23,6 +23,17 @@ const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.t
 const loginPairs = new Map();
 let offset = 0;
 
+// Match the paths and query parameters used by the TEC web app.
+async function tecFolders(tecClient = client) {
+  const response = await tecClient.get('/pastas-cadernos/', { buscarSubpastas: true });
+  if (!Array.isArray(response.pastas)) throw new Error('O TEC não retornou a lista de pastas. Confira a sessão sincronizada.');
+  return response.pastas;
+}
+async function tecQuestionFromNotebook(cadernoId, position) {
+  const response = await client.get(`/cadernos/${cadernoId}/questoes/${position}`, { atualizarCronometro: false });
+  return response.questao;
+}
+
 function save() {
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
   const tmp = `${stateFile}.tmp`;
@@ -38,9 +49,14 @@ async function tg(method, payload = {}) {
 async function importLogin(cookieText) {
   const trial = new Session(path.join(tecDir, '.session-check.json'));
   try {
-    importCookies(new TecClient({ session: trial }), cookieText);
-    if (!(await new TecClient({ session: trial }).whoami()).logged) {
-      throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
+    const trialClient = new TecClient({ session: trial });
+    importCookies(trialClient, cookieText);
+    try { await tecFolders(trialClient); }
+    catch (error) {
+      if (error instanceof AuthError || [401, 403].includes(error.status)) {
+        throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
+      }
+      throw error;
     }
     session.cookies = trial.cookies;
     session.meta = { via: 'chrome-extension-sync', at: new Date().toISOString() };
@@ -122,7 +138,7 @@ function cadernoId(input) {
   throw new Error('Não encontrei o ID do caderno no link. Use /questoes/cadernos/ID.');
 }
 async function loadQuestion(cid, n) {
-  const item = await api.cadernoQuestao(cid, n);
+  const item = await tecQuestionFromNotebook(cid, n);
   if (!item) return null;
   const id = item.idQuestao ?? item.id ?? item.questaoId;
   if (!id) throw new Error('O TEC retornou uma questão sem ID.');
@@ -154,7 +170,7 @@ async function loadQuestion(cid, n) {
 }
 function totalFrom(item) { return Number(item?.quantidadeItens ?? item?.totalQuestoes ?? item?.quantidade ?? 0); }
 async function findTotal(cid) {
-  const folders = await api.pastas();
+  const folders = await tecFolders();
   for (const folder of folders) {
     for (let p = 1; ; p++) {
       const items = await api.listarCadernos(folder.id, { pagina: p });
@@ -176,7 +192,7 @@ async function listAll(folderId, subfolderId) {
 }
 function button(text, callback_data) { return { text: String(text).slice(0, 60), callback_data }; }
 async function browse(chatId, messageId, where = { type: 'root', page: 0 }) {
-  const folders = await api.pastas();
+  const folders = await tecFolders();
   if (!folders.length) throw new Error('Não encontrei pastas na sua conta TEC.');
   let folder, subfolderId = null, title, back = 'b:root';
   if (where.type === 'root') {
@@ -220,7 +236,7 @@ async function browse(chatId, messageId, where = { type: 'root', page: 0 }) {
   else await tg('sendMessage', { chat_id: chatId, text, reply_markup: payload.reply_markup });
 }
 async function showFolders(chatId, messageId, page = 0) {
-  const folders = await api.pastas();
+  const folders = await tecFolders();
   const pageSize = 12, pages = Math.max(1, Math.ceil(folders.length / pageSize));
   page = Math.min(Math.max(0, Number(page) || 0), pages - 1);
   const keyboard = folders.slice(page * pageSize, (page + 1) * pageSize).map(f => [button(`📂 ${f.nome}`, `b:f:${f.id}:0`)]);
@@ -355,7 +371,7 @@ async function handleUpdate(u) {
         else if (action === 'f') await browse(cb.message.chat.id, cb.message.message_id, { type: 'folder', folderId: a, page: b });
         else if (action === 's') await browse(cb.message.chat.id, cb.message.message_id, { type: 'sub', folderId: a, subfolderId: b, page: c });
         else if (action === 'c') {
-          const folders = await api.pastas();
+          const folders = await tecFolders();
           if (!folders.some(folder => String(folder.id) === String(a))) throw new Error('Pasta não encontrada.');
           const subfolderId = c && b !== '0' ? b : null;
           const caderno = c || b;
