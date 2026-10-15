@@ -142,7 +142,9 @@ for path in glob.glob('/etc/apache2/sites-enabled/*'):
         names = re.findall(r'^\s*Server(?:Name|Alias)\s+(.+?)\s*$', body, re.I | re.M)
         if not any(host in line.split() for line in names):
             return match.group(0)
-        body = re.sub(r'(?ms)^\s*' + re.escape(marker) + r'.*?(?=^\s*</VirtualHost>)', '', body)
+        # `body` excludes the closing VirtualHost tag, so remove the old managed
+        # tail through the end of the body before adding the current routes.
+        body = re.sub(r'(?ms)^\s*' + re.escape(marker) + r'.*$', '', body)
         changed = True
         return opening + body.rstrip() + '\n' + block + closing
     updated = re.sub(r'(?is)(<VirtualHost\b[^>]*>)(.*?)(</VirtualHost\s*>)', update, text)
