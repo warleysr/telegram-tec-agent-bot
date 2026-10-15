@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TEC Session Sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sincroniza a sessão do TEC com seu bot privado na VPS.",
   "permissions": ["cookies", "storage"],
   "host_permissions": [

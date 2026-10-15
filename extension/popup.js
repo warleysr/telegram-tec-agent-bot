@@ -1,6 +1,5 @@
 const API_BASE = 'https://blackgroup.com.br/tec-login';
 const statusEl = document.getElementById('status');
-const pairingEl = document.getElementById('pairing');
 const codeEl = document.getElementById('code');
 const pairButton = document.getElementById('pair');
 const syncButton = document.getElementById('sync');
@@ -8,12 +7,16 @@ const syncButton = document.getElementById('sync');
 function showStatus(message) { statusEl.textContent = message; }
 
 async function refreshUI() {
-  const { deviceToken, syncedAt, lastError } = await chrome.storage.local.get(['deviceToken', 'syncedAt', 'lastError']);
-  pairingEl.hidden = Boolean(deviceToken);
-  syncButton.hidden = !deviceToken;
-  if (lastError) showStatus(`Último aviso: ${lastError}`);
-  else if (syncedAt) showStatus(`Sessão validada e sincronizada em ${new Date(syncedAt).toLocaleString()}.`);
-  else if (deviceToken) showStatus('Extensão pareada. Ainda não há sincronização validada.');
+  try {
+    const { deviceToken, syncedAt, lastError } = await chrome.storage.local.get(['deviceToken', 'syncedAt', 'lastError']);
+    syncButton.hidden = !deviceToken;
+    if (lastError) showStatus(`Último aviso: ${lastError}`);
+    else if (syncedAt) showStatus(`Pareada. Sessão validada em ${new Date(syncedAt).toLocaleString()}.`);
+    else if (deviceToken) showStatus('Extensão pareada. Clique em “Sincronizar agora” ou informe um novo código abaixo.');
+    else showStatus('Ainda não pareada. Envie /login ao bot e informe o código acima.');
+  } catch (error) {
+    showStatus(`Não consegui ler o estado da extensão: ${error.message}`);
+  }
 }
 
 async function pairAndSync() {
@@ -27,7 +30,9 @@ async function pairAndSync() {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `Falha no pareamento (HTTP ${response.status}).`);
+    if (!result.token) throw new Error('O servidor não retornou o token de pareamento. Envie /login ao bot novamente.');
     await chrome.storage.local.set({ deviceToken: result.token, lastError: '' });
+    codeEl.value = '';
     await refreshUI();
     await syncNow();
   } catch (error) { showStatus(error.message); }
