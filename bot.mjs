@@ -48,13 +48,20 @@ function htmlPage(attempt) {
   return `<!doctype html><html lang="pt-BR"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta charset="utf-8"><title>Login TEC</title><style>
     *{box-sizing:border-box}body{margin:0;background:#101820;color:#fff;font:16px system-ui,sans-serif}header{padding:14px 16px;background:#17232d;position:sticky;top:0;z-index:1}h1{font-size:18px;margin:0 0 4px}p{font-size:14px;color:#c9d4dc;margin:4px 0}#status{color:#9fe6b8}#screen{width:100vw;height:calc(100dvh - 90px);touch-action:none;overflow:hidden}canvas{width:100%;height:100%;object-fit:contain}button{padding:8px 12px;border:0;border-radius:8px;background:#3979f6;color:white;font-weight:600}
     </style><header><h1>Conectar ao TEC</h1><p>Faça login normalmente nesta janela. O bot captura a sessão após a confirmação do TEC.</p><p id="status">Preparando conexão segura…</p></header><div id="screen"></div><script type="module">
-      import { RFB } from '/tec-vnc/core/rfb.js';
       const status=document.getElementById('status');
-      const rfb=new RFB(document.getElementById('screen'),${wsJson},{credentials:{password:${password}}});
-      rfb.scaleViewport=true; rfb.resizeSession=false;
-      rfb.addEventListener('connect',()=>status.textContent='Conectado. Entre na sua conta TEC.');
-      rfb.addEventListener('disconnect',e=>status.textContent=e.detail.clean?'Conexão encerrada.':'Conexão interrompida; recarregue o link se ele ainda não expirou.');
-      rfb.addEventListener('credentialsrequired',()=>rfb.sendCredentials({password:${password}}));
+      window.addEventListener('error',e=>{status.textContent='Falha ao carregar a tela remota: '+e.message;});
+      window.addEventListener('unhandledrejection',e=>{status.textContent='Falha ao iniciar a tela remota: '+(e.reason?.message||e.reason);});
+      let rfb;
+      try {
+        const module=await import('/tec-vnc/core/rfb.js');
+        const RFB=module.default||module.RFB;
+        if(!RFB) throw new Error('A biblioteca noVNC não exportou RFB.');
+        rfb=new RFB(document.getElementById('screen'),${wsJson},{credentials:{password:${password}}});
+        rfb.scaleViewport=true; rfb.resizeSession=false;
+        rfb.addEventListener('connect',()=>status.textContent='Conectado. Entre na sua conta TEC.');
+        rfb.addEventListener('disconnect',e=>status.textContent=e.detail.clean?'Conexão encerrada.':'Conexão interrompida; recarregue o link se ele ainda não expirou.');
+        rfb.addEventListener('credentialsrequired',()=>rfb.sendCredentials({password:${password}}));
+      } catch(e) { status.textContent='Falha ao iniciar a tela remota: '+e.message; }
       async function check(){try{const r=await fetch(location.pathname+'/status'+location.search,{cache:'no-store'});const d=await r.json();if(d.status==='success'){status.textContent='Login confirmado! Você já pode fechar esta página.';return;}if(d.status==='failed'||d.status==='expired'){status.textContent=d.message;return;}}catch{}setTimeout(check,2500)}check();
     </script></html>`;
 }
