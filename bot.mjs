@@ -179,7 +179,7 @@ async function showQuestion(chat, user, mode = 'next') {
     q.prova,
     q.numero ? `Questão ${q.numero}` : null,
   ].filter(Boolean).join(' - ') || `Questão TEC #${q.id}`;
-  const prompt = compact(`${q.enunciado || '(sem enunciado)'}${q.materia?.nome ? `\n${q.materia.nome}` : ''}`);
+  const prompt = compact(q.enunciado || '(sem enunciado)');
   const parts = prompt.match(/[\s\S]{1,3800}/g) || [''];
   for (let i = 0; i < parts.length; i++) {
     await tg('sendMessage', { chat_id: chat.id, text: `${i === 0 ? `<b>${escapeHtml(description)}</b>\n` : ''}${escapeHtml(parts[i])}`, parse_mode: 'HTML' });
