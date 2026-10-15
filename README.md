@@ -62,7 +62,11 @@ Na VPS, obtenha a versão nova e reinicie o serviço:
 ```bash
 cd telegram-tec-agent-bot
 git pull
+sudo apt-get install -y python3-venv
+sudo python3 -m venv /opt/telegram-tec-bot/venv
+sudo /opt/telegram-tec-bot/venv/bin/pip install --disable-pip-version-check --no-deps 'websockify==0.13.0'
 sudo install -m 0644 bot.mjs /opt/telegram-tec-bot/bot.mjs
+sudo sh -c 'grep -q "^BOT_WEBSOCKIFY_BIN=" /etc/telegram-tec-bot.env || echo "BOT_WEBSOCKIFY_BIN=/opt/telegram-tec-bot/venv/bin/websockify" >> /etc/telegram-tec-bot.env'
 sudo systemctl restart telegram-tec-bot
 ```
 
