@@ -49,7 +49,7 @@ apt_update() {
   return "$status"
 }
 apt_update
-apt-get install -y xvfb x11vnc novnc python3-websockify
+apt-get install -y xvfb x11vnc novnc python3-websockify python3-venv
 if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
   if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
     apt-get install -y ca-certificates curl gnupg
@@ -191,6 +191,8 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 install -d -o root -g root -m 0755 "$APP_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$DATA_DIR" "$DATA_DIR/tec"
+python3 -m venv "$APP_DIR/venv"
+"$APP_DIR/venv/bin/pip" install --disable-pip-version-check --no-deps 'websockify==0.13.0'
 NODE_SOURCE="$(command -v node)"
 NODE_BIN="$APP_DIR/node"
 install -m 0755 "$NODE_SOURCE" "$NODE_BIN"
@@ -204,8 +206,8 @@ fi
 chmod -R a+rX "$TEC_DIR"
 
 umask 077
-printf 'TELEGRAM_BOT_TOKEN=%s\nBOT_ADMIN_IDS=%s\nBOT_LOGIN_BASE_URL=%s\nBOT_LOGIN_PORT=8088\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
-  "$TELEGRAM_BOT_TOKEN" "$BOT_ADMIN_IDS" "$BOT_LOGIN_BASE_URL" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
+printf 'TELEGRAM_BOT_TOKEN=%s\nBOT_ADMIN_IDS=%s\nBOT_LOGIN_BASE_URL=%s\nBOT_LOGIN_PORT=8088\nBOT_WEBSOCKIFY_BIN=%s/venv/bin/websockify\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
+  "$TELEGRAM_BOT_TOKEN" "$BOT_ADMIN_IDS" "$BOT_LOGIN_BASE_URL" "$APP_DIR" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
 unset TELEGRAM_BOT_TOKEN
 chown root:root "$ENV_FILE"
 chmod 0600 "$ENV_FILE"

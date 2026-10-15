@@ -18,7 +18,7 @@ O script pedirá:
 2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
 3. A URL HTTPS pública que será usada no login, terminada em `/tec-login` (por exemplo, `https://bot.seudominio.com/tec-login`).
 
-O instalador copia o executável Node para a pasta do serviço (inclusive quando o Node veio do NVM em `/root`), prepara Chromium, Xvfb, x11vnc e Websockify e configura o proxy HTTPS automaticamente. No Nginx, cria um host virtual e solicita o certificado; no Apache, adiciona as rotas ao virtual host HTTPS existente e reutiliza o certificado instalado. Se nenhum deles estiver ativo, instala e configura o Caddy, que emite o certificado automaticamente. Para emissão automática, o DNS do domínio deve apontar para a VPS e as portas 80 e 443 precisam estar acessíveis. Depois, envie `/login` ao bot no privado.
+O instalador copia o executável Node para a pasta do serviço (inclusive quando o Node veio do NVM em `/root`), prepara Chromium, Xvfb e x11vnc, e instala o Websockify 0.13.0 em um virtualenv isolado. Isso evita o erro do pacote Websockify 0.9.0 do Ubuntu 20.04 com versões atuais do Python. Também configura o proxy HTTPS automaticamente. No Nginx, cria um host virtual e solicita o certificado; no Apache, adiciona as rotas ao virtual host HTTPS existente e reutiliza o certificado instalado. Se nenhum deles estiver ativo, instala e configura o Caddy, que emite o certificado automaticamente. Para emissão automática, o DNS do domínio deve apontar para a VPS e as portas 80 e 443 precisam estar acessíveis. Depois, envie `/login` ao bot no privado.
 
 Depois, acompanhe o serviço com:
 
