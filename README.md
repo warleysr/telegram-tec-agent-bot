@@ -16,7 +16,34 @@ O script pedirá:
 
 1. O token criado no `@BotFather` (entrada oculta).
 2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
-3. O valor do header `Cookie` de uma sessão logada no TEC, sem o prefixo `Cookie:` (entrada oculta). A sessão é validada antes de iniciar o serviço.
+3. A URL HTTPS pública que será usada no login, terminada em `/tec-login` (por exemplo, `https://bot.seudominio.com/tec-login`).
+
+O instalador prepara Chromium, Xvfb, x11vnc e Websockify. Depois, configure o proxy do seu domínio para os caminhos abaixo e envie `/login` ao bot no privado:
+
+```caddyfile
+bot.seudominio.com {
+    handle /tec-login* {
+        reverse_proxy 127.0.0.1:8088
+    }
+    handle_path /tec-vnc/* {
+        reverse_proxy 127.0.0.1:6080
+    }
+}
+```
+
+Se já usa Nginx, configure os locais equivalentes, incluindo upgrade de WebSocket em `/tec-vnc/`:
+
+```nginx
+location /tec-login {
+    proxy_pass http://127.0.0.1:8088;
+}
+location /tec-vnc/ {
+    proxy_pass http://127.0.0.1:6080/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
 
 Depois, acompanhe o serviço com:
 
@@ -34,7 +61,7 @@ O instalador não instala Node.js nem Git. Instale Node.js 20 ou superior e Git 
 - `/aleatoria` escolhe entre suas questões não respondidas.
 - `/status` mostra seu progresso.
 - `/lista` abre a navegação por pastas, subpastas e cadernos, com botões de seleção.
-- `/login` permite ao administrador atualizar os cookies TEC depois de fazer login novamente no navegador. Inicie o comando em conversa privada e envie o valor do header `Cookie` (sem `Cookie:`) na mensagem seguinte. O bot tenta apagar essa mensagem depois de recebê-la; se ela continuar visível, apague-a manualmente.
+- `/login` envia ao administrador um link HTTPS de uso temporário. Abra-o no celular, entre no TEC na janela remota e a sessão será capturada e validada automaticamente. O link expira em 10 minutos; o bot não pede senha nem cookie no Telegram.
 - `/id` mostra seu ID Telegram para configurar permissões administrativas.
 
 Cada questão chega como quiz do Telegram, que indica acerto ou erro e oferece o botão **Ver comentário**. A descrição da prova aparece em negrito antes do enunciado; os botões **Próxima** e **Aleatória** ficam logo abaixo do quiz. Em grupos, o progresso é separado por usuário e chat. Respostas no Telegram não são sincronizadas com o TEC.
@@ -49,7 +76,7 @@ Exemplo:
 /lista
 ```
 
-O login do TEC aceita uma sessão ativa por vez. Se autenticar no navegador e isso invalidar a sessão usada pelo bot, envie `/login` ao bot no privado e cole os cookies atuais. O bot valida a nova sessão antes de substituir a salva.
+O login do TEC aceita uma sessão ativa por vez. Se a sessão expirar, envie `/login` ao bot no privado. A janela remota usa o navegador da VPS e atualiza a sessão armazenada pelo bot após o TEC confirmar a autenticação. O progresso de questões do TEC não é alterado.
 
 O bot usa long polling, sem necessidade de abrir uma porta ou configurar webhook. Os comandos funcionam em grupos com o modo privacy padrão do Telegram.
 
@@ -64,7 +91,7 @@ sudo install -m 0644 bot.mjs /opt/telegram-tec-bot/bot.mjs
 sudo systemctl restart telegram-tec-bot
 ```
 
-Para uma instalação anterior, autorize o `/login` definindo `BOT_ADMIN_IDS` em `/etc/telegram-tec-bot.env` (um ou mais IDs numéricos separados por vírgula) e reinicie o serviço.
+Para uma instalação anterior, atualize `BOT_ADMIN_IDS` e `BOT_LOGIN_BASE_URL` em `/etc/telegram-tec-bot.env`, instale Chromium, Xvfb, x11vnc e Websockify e configure o proxy HTTPS acima. Reinicie o serviço depois.
 
 ## Dados e credenciais
 
@@ -77,5 +104,6 @@ Faça backup de `/var/lib/telegram-tec-bot/` para preservar a sessão e os hist�
 ## Limitações
 
 - O link precisa ser direto e conter um ID numérico (`/questoes/cadernos/ID`). Links curtos `/s/...` e `/caderno/...` ainda não são resolvidos.
+- O login remoto requer VPS Debian/Ubuntu e domínio HTTPS com proxy WebSocket para `/tec-vnc/`.
 - A sessão do tec-agent precisa ter acesso ao caderno e a listagem deve informar a quantidade de questões.
 - Se o tec-agent não identificar o gabarito, o bot interrompe o envio daquela questão para evitar uma correção errada.

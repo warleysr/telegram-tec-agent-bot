@@ -26,6 +26,26 @@ if ! command -v git >/dev/null; then
   echo "Git é necessário para obter o tec-agent. Instale-o antes de continuar." >&2
   exit 1
 fi
+if ! command -v apt-get >/dev/null; then
+  echo "O login pelo navegador remoto requer uma VPS Debian/Ubuntu com apt-get." >&2
+  echo "Instale manualmente Chromium, Xvfb, x11vnc e websockify antes de continuar." >&2
+  exit 1
+fi
+apt-get update
+apt-get install -y xvfb x11vnc novnc python3-websockify
+if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
+  if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
+    apt-get install -y ca-certificates curl gnupg
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
+    chmod 0644 /etc/apt/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update
+    apt-get install -y google-chrome-stable
+  fi
+else
+  if ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null; then apt-get install -y chromium; fi
+fi
 NODE_BIN="$(command -v node)"
 
 read -r -s -p "Token do bot (BotFather): " TELEGRAM_BOT_TOKEN
@@ -33,9 +53,9 @@ printf '\n'
 if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then echo "Token vazio." >&2; exit 1; fi
 read -r -p "ID Telegram do administrador (consulte @userinfobot): " BOT_ADMIN_IDS
 if [[ ! "$BOT_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then echo "Informe um ou mais IDs numéricos separados por vírgula." >&2; exit 1; fi
-read -r -s -p "Cookies do TEC (valor do header, sem escrever 'Cookie:'): " TEC_COOKIES
+read -r -p "URL HTTPS pública para o login TEC (ex.: https://bot.seudominio.com/tec-login): " BOT_LOGIN_BASE_URL
 printf '\n'
-if [[ -z "$TEC_COOKIES" ]]; then echo "Cookies vazios." >&2; exit 1; fi
+if [[ ! "$BOT_LOGIN_BASE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/tec-login/?$ ]]; then echo "Use uma URL HTTPS pública terminada em /tec-login." >&2; exit 1; fi
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -51,24 +71,9 @@ if [[ ! -d "$TEC_DIR/.git" ]]; then
 fi
 chmod -R a+rX "$TEC_DIR"
 
-export TEC_COOKIES TEC_AGENT_DIR="$DATA_DIR/tec"
-node --input-type=module -e '
-  import { TecClient, Session } from "/opt/tec-agent/src/client.mjs";
-  import { importCookies } from "/opt/tec-agent/src/auth.mjs";
-  const session = Session.load(`${process.env.TEC_AGENT_DIR}/session.json`);
-  const client = new TecClient({ session });
-  importCookies(client, process.env.TEC_COOKIES);
-  const who = await client.whoami();
-  if (!who.logged) { console.error("Sessão TEC não autenticada. Confira os cookies exportados."); process.exit(1); }
-  console.log("Sessão TEC validada.");
-'
-chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/tec/session.json"
-chmod 0600 "$DATA_DIR/tec/session.json"
-unset TEC_COOKIES
-
 umask 077
-printf 'TELEGRAM_BOT_TOKEN=%s\nBOT_ADMIN_IDS=%s\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
-  "$TELEGRAM_BOT_TOKEN" "$BOT_ADMIN_IDS" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
+printf 'TELEGRAM_BOT_TOKEN=%s\nBOT_ADMIN_IDS=%s\nBOT_LOGIN_BASE_URL=%s\nBOT_LOGIN_PORT=8088\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
+  "$TELEGRAM_BOT_TOKEN" "$BOT_ADMIN_IDS" "$BOT_LOGIN_BASE_URL" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
 unset TELEGRAM_BOT_TOKEN
 chown root:root "$ENV_FILE"
 chmod 0600 "$ENV_FILE"
@@ -102,3 +107,5 @@ systemctl daemon-reload
 systemctl enable --now "${APP}.service"
 echo
 echo "Instalação concluída. Acompanhe com: journalctl -u ${APP} -f"
+echo "Configure o proxy HTTPS para /tec-login -> 127.0.0.1:8088 e /tec-vnc/* -> 127.0.0.1:6080 (WebSocket)."
+echo "Depois envie /login ao bot no privado para conectar a sessão TEC pelo navegador do celular."

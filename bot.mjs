@@ -1,15 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('Defina TELEGRAM_BOT_TOKEN.');
 const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent');
+process.env.TEC_AGENT_HOME ||= tecDir;
 const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
 const { TecClient, Session } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
 const { TecApi } = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
-const { importCookies } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
+const { loginBrowser } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
 const session = Session.load(path.join(tecDir, 'session.json'));
 const client = new TecClient({ session });
 const api = new TecApi(client);
@@ -17,7 +21,11 @@ const base = `https://api.telegram.org/bot${token}`;
 const stateFile = path.resolve(process.env.BOT_DATA_DIR || '.', 'bot-state.json');
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { chats: {}, polls: {} };
 const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
-const loginPending = new Set();
+const loginBaseUrl = process.env.BOT_LOGIN_BASE_URL || '';
+const loginPort = Number(process.env.BOT_LOGIN_PORT || 8088);
+const loginAttempts = new Map();
+let activeLogin = null;
+let loginTunnel = null;
 let offset = 0;
 
 function save() {
@@ -31,6 +39,138 @@ async function tg(method, payload = {}) {
   const data = await res.json();
   if (!data.ok) throw new Error(data.description || `Telegram ${method} falhou`);
   return data.result;
+}
+function htmlPage(attempt) {
+  const ws = new URL(loginBaseUrl);
+  const wsUrl = `wss://${ws.host}/tec-vnc/websockify`;
+  const password = JSON.stringify(attempt.vncPassword);
+  const wsJson = JSON.stringify(wsUrl);
+  return `<!doctype html><html lang="pt-BR"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta charset="utf-8"><title>Login TEC</title><style>
+    *{box-sizing:border-box}body{margin:0;background:#101820;color:#fff;font:16px system-ui,sans-serif}header{padding:14px 16px;background:#17232d;position:sticky;top:0;z-index:1}h1{font-size:18px;margin:0 0 4px}p{font-size:14px;color:#c9d4dc;margin:4px 0}#status{color:#9fe6b8}#screen{width:100vw;height:calc(100dvh - 90px);touch-action:none;overflow:hidden}canvas{width:100%;height:100%;object-fit:contain}button{padding:8px 12px;border:0;border-radius:8px;background:#3979f6;color:white;font-weight:600}
+    </style><header><h1>Conectar ao TEC</h1><p>Faça login normalmente nesta janela. O bot captura a sessão após a confirmação do TEC.</p><p id="status">Preparando conexão segura…</p></header><div id="screen"></div><script type="module">
+      import { RFB } from '/tec-vnc/core/rfb.js';
+      const status=document.getElementById('status');
+      const rfb=new RFB(document.getElementById('screen'),${wsJson},{credentials:{password:${password}}});
+      rfb.scaleViewport=true; rfb.resizeSession=false;
+      rfb.addEventListener('connect',()=>status.textContent='Conectado. Entre na sua conta TEC.');
+      rfb.addEventListener('disconnect',e=>status.textContent=e.detail.clean?'Conexão encerrada.':'Conexão interrompida; recarregue o link se ele ainda não expirou.');
+      rfb.addEventListener('credentialsrequired',()=>rfb.sendCredentials({password:${password}}));
+      async function check(){try{const r=await fetch(location.pathname+'/status'+location.search,{cache:'no-store'});const d=await r.json();if(d.status==='success'){status.textContent='Login confirmado! Você já pode fechar esta página.';return;}if(d.status==='failed'||d.status==='expired'){status.textContent=d.message;return;}}catch{}setTimeout(check,2500)}check();
+    </script></html>`;
+}
+function sendJson(res, status, value) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  res.end(JSON.stringify(value));
+}
+const loginPath = loginBaseUrl ? new URL(loginBaseUrl).pathname.replace(/\/+$/, '') : '';
+const loginServer = createServer((req, res) => {
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  const tokenValue = url.searchParams.get('token') || '';
+  const attempt = loginAttempts.get(tokenValue);
+  if (!attempt || Date.now() > attempt.expiresAt) {
+    if (url.pathname === `${loginPath}/status`) return sendJson(res, 410, { status: 'expired', message: 'Link de login expirado. Envie /login ao bot para gerar outro.' });
+    res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end('Link de login expirado. Gere outro pelo Telegram.');
+  }
+  if (url.pathname === `${loginPath}/status`) return sendJson(res, 200, { status: attempt.status, message: attempt.status === 'failed' ? 'O login não foi concluído. Gere um novo link pelo Telegram.' : undefined });
+  if (req.method !== 'GET' || url.pathname !== loginPath) {
+    res.writeHead(404, { 'cache-control': 'no-store' });
+    return res.end();
+  }
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'self'; connect-src 'self' wss:",
+  });
+  res.end(htmlPage(attempt));
+});
+function managedProcess(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'ignore', env: { ...process.env, ...env } });
+    child.once('spawn', () => resolve(child));
+    child.once('error', reject);
+  });
+}
+async function stopLoginTunnel() {
+  const children = loginTunnel || [];
+  loginTunnel = null;
+  for (const child of children.reverse()) if (child && child.exitCode === null) child.kill('SIGTERM');
+}
+async function startLoginTunnel(password) {
+  if (loginTunnel) throw new Error('Já existe um login TEC em andamento.');
+  const display = process.env.TEC_LOGIN_DISPLAY || ':99';
+  const children = [];
+  try {
+    children.push(await managedProcess('Xvfb', [display, '-screen', '0', '1440x1000x24', '-nolisten', 'tcp', '-ac']));
+    await new Promise(resolve => setTimeout(resolve, 500));
+    children.push(await managedProcess('x11vnc', ['-display', display, '-forever', '-shared', '-rfbport', '5900', '-localhost', '-passwd', password, '-noxdamage']));
+    children.push(await managedProcess('websockify', ['--web=/usr/share/novnc', '--heartbeat=30', '127.0.0.1:6080', '127.0.0.1:5900']));
+    await new Promise(resolve => setTimeout(resolve, 500));
+    if (children.some(child => child.exitCode !== null)) throw new Error('Não consegui iniciar a tela remota de login na VPS.');
+    loginTunnel = children;
+    process.env.DISPLAY = display;
+  } catch (error) {
+    for (const child of children.reverse()) if (child.exitCode === null) child.kill('SIGTERM');
+    throw error;
+  }
+}
+function stopLoginChrome() {
+  const profileArg = `--user-data-dir=${path.join(tecDir, 'chrome-profile')}`;
+  try {
+    for (const pid of fs.readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
+      try {
+        const commandLine = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ');
+        if (commandLine.includes(profileArg)) process.kill(Number(pid), 'SIGTERM');
+      } catch { /* processo terminou ou não pertence ao usuário do serviço */ }
+    }
+  } catch { /* somente disponível no Linux da VPS */ }
+}
+async function beginLogin(chatId, userId) {
+  if (!loginBaseUrl) throw new Error('Falta configurar BOT_LOGIN_BASE_URL com o endereço HTTPS /tec-login da VPS.');
+  const publicUrl = new URL(loginBaseUrl);
+  if (publicUrl.protocol !== 'https:') throw new Error('O login remoto exige BOT_LOGIN_BASE_URL com HTTPS.');
+  if (activeLogin) throw new Error('Já existe um login em andamento. Abra o link recebido ou aguarde ele expirar.');
+  const attempt = {
+    token: randomBytes(32).toString('base64url'),
+    vncPassword: randomBytes(8).toString('base64url').slice(0, 8),
+    chatId, userId, status: 'waiting', expiresAt: Date.now() + 10 * 60_000,
+  };
+  loginAttempts.set(attempt.token, attempt);
+  activeLogin = attempt;
+  try {
+    await startLoginTunnel(attempt.vncPassword);
+    attempt.runner = loginBrowser(client, { timeoutMs: 10 * 60_000, log: () => {} })
+      .then(async () => {
+        attempt.status = 'success';
+        await tg('sendMessage', { chat_id: chatId, text: 'Sessão TEC atualizada com sucesso. O bot já pode buscar questões e cadernos.' });
+      })
+      .catch(async error => {
+        attempt.status = 'failed';
+        console.error(`Login TEC falhou: ${error.message}`);
+        await tg('sendMessage', { chat_id: chatId, text: `Não consegui concluir o login TEC: ${error.message}` }).catch(() => {});
+      })
+      .finally(async () => {
+        stopLoginChrome();
+        await stopLoginTunnel();
+        fs.rmSync(path.join(tecDir, 'chrome-profile'), { recursive: true, force: true });
+        activeLogin = null;
+        setTimeout(() => loginAttempts.delete(attempt.token), 60_000).unref();
+      });
+    const link = new URL(loginPath, publicUrl.origin);
+    link.searchParams.set('token', attempt.token);
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: 'Abra o link no celular e entre no TEC na janela remota. O bot detectará o login e atualizará a sessão automaticamente. O link expira em 10 minutos.',
+      reply_markup: { inline_keyboard: [[{ text: '🔐 Abrir login do TEC', url: link.href }]] },
+    });
+  } catch (error) {
+    loginAttempts.delete(attempt.token);
+    activeLogin = null;
+    stopLoginChrome();
+    await stopLoginTunnel();
+    fs.rmSync(path.join(tecDir, 'chrome-profile'), { recursive: true, force: true });
+    throw error;
+  }
 }
 const chatKey = (id) => String(id);
 function privateChat(chat) { return chat.type === 'private'; }
@@ -159,18 +299,6 @@ async function showFolders(chatId, messageId, page = 0) {
   if (messageId) await tg('editMessageText', { ...payload, message_id: messageId });
   else await tg('sendMessage', payload);
 }
-async function importLogin(cookieText) {
-  const tempFile = path.join(tecDir, '.session-check.json');
-  const trial = new Session(tempFile);
-  try {
-    importCookies(new TecClient({ session: trial }), cookieText);
-    if (!(await new TecClient({ session: trial }).whoami()).logged) throw new Error('O TEC não aceitou esses cookies. Copie novamente o header Cookie da sessão atual.');
-    session.cookies = trial.cookies;
-    session.meta = { ...trial.meta, at: new Date().toISOString() };
-    session.save();
-    return true;
-  } finally { trial.clear(); }
-}
 function chatState(chatId) { return state.chats[chatKey(chatId)] ||= {}; }
 function scoreKey(chatId, userId, cid) { return `${chatId}:${userId}:${cid}`; }
 function solvedSet(chatId, userId, cid) { return new Set(state.answers?.[scoreKey(chatId, userId, cid)] || []); }
@@ -231,21 +359,12 @@ async function handleMessage(m) {
   const [cmd, ...args] = m.text.trim().split(/\s+/);
   const chat = m.chat, user = m.from;
   try {
-    if (loginPending.has(String(user.id))) {
-      loginPending.delete(String(user.id));
-      await tg('deleteMessage', { chat_id: chat.id, message_id: m.message_id }).catch(() => {});
-      try {
-        await importLogin(m.text);
-        return tg('sendMessage', { chat_id: chat.id, text: 'Sessão TEC atualizada e validada. Os próximos pedidos usarão os cookies novos.' });
-      } catch (e) { return tg('sendMessage', { chat_id: chat.id, text: `Não consegui atualizar a sessão: ${e.message}` }); }
-    }
     if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
     if (cmd === '/id' || cmd.startsWith('/id@')) return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
     if (cmd === '/login' || cmd.startsWith('/login@')) {
       if (!admins.has(String(user.id))) throw new Error('Este comando é restrito aos administradores configurados na VPS.');
       if (!privateChat(chat)) throw new Error('Por segurança, envie /login em uma conversa privada com o bot.');
-      loginPending.add(String(user.id));
-      return tg('sendMessage', { chat_id: chat.id, text: 'Envie agora, nesta conversa privada, o valor do header Cookie da sessão TEC (sem escrever “Cookie:”). O bot tenta apagar a mensagem recebida; se ela continuar visível, apague-a manualmente.' });
+      return beginLogin(chat.id, user.id);
     }
     if (cmd === '/caderno' || cmd.startsWith('/caderno@')) {
       const id = cadernoId(args.join(' '));
@@ -316,6 +435,15 @@ async function handleUpdate(u) {
       catch (e) { await tg('sendMessage', { chat_id: cb.message.chat.id, text: `Erro: ${e.message}` }); }
     }
   }
+}
+if (loginBaseUrl) {
+  const publicLoginUrl = new URL(loginBaseUrl);
+  if (publicLoginUrl.protocol !== 'https:' || !loginPath || loginPath === '/') throw new Error('BOT_LOGIN_BASE_URL deve ser uma URL HTTPS terminada em /tec-login.');
+  await new Promise((resolve, reject) => {
+    loginServer.once('error', reject);
+    loginServer.listen(loginPort, '127.0.0.1', resolve);
+  });
+  console.log(`Login TEC por navegador remoto ativo em 127.0.0.1:${loginPort}${loginPath}`);
 }
 console.log(`Bot iniciado. Estado: ${stateFile}`);
 while (true) {
