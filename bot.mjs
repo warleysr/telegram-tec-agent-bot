@@ -51,37 +51,29 @@ async function loadQuestion(cid, n) {
   if (!item) return null;
   const id = item.idQuestao ?? item.id ?? item.questaoId;
   if (!id) throw new Error('O TEC retornou uma questão sem ID.');
-  const q = await api.questao(id, { comentario: true });
-  if (q.gabarito) return q;
+  const [q, raw] = await Promise.all([
+    api.questao(id, { comentario: true }),
+    api.questaoBruta(id),
+  ]);
 
-  const opcoes = q.alternativas || [];
-  const normalizar = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-  const ce = q.tipo === 'CERTO_ERRADO' || (opcoes.length === 2 && new Set(opcoes.map(normalizar)).size === 2 && opcoes.every(x => ['certo', 'errado'].includes(normalizar(x))));
-  const raw = await api.questaoBruta(id);
-  const numero = Number(raw?.numeroAlternativaCorreta);
+  // Só usamos o campo estruturado da API. O tec-agent também tenta inferir a
+  // resposta pelo comentário do professor; essa inferência pode confundir uma
+  // conclusão sobre o texto-base com o gabarito do item.
+  q.gabarito = null;
+  const numero = typeof raw?.numeroAlternativaCorreta === 'number'
+    ? raw.numeroAlternativaCorreta
+    : /^\d+$/.test(String(raw?.numeroAlternativaCorreta ?? ''))
+      ? Number(raw.numeroAlternativaCorreta)
+      : NaN;
+  // Em algumas questões C/E a API omite o array de alternativas; o Telegram
+  // já usa exatamente estas duas opções como fallback em showQuestion().
+  const opcoes = q.alternativas?.length
+    ? q.alternativas
+    : q.tipo === 'CERTO_ERRADO' ? ['Certo', 'Errado'] : [];
   if (Number.isInteger(numero) && numero > 0 && numero <= opcoes.length) {
-    q.gabarito = ce ? opcoes[numero - 1] : String.fromCharCode(64 + numero);
-    return q;
-  }
-
-  // O tec-agent só interpreta conclusões C/E quando tipoQuestao é exatamente CERTO_ERRADO.
-  // Algumas respostas usam outra variante do tipo; as alternativas e o comentário resolvem esse caso.
-  if (ce && q.comentario) {
-    const texto = q.comentario.replace(/\s+/g, ' ');
-    const conclusoes = [...texto.matchAll(/\b(?:item|afirmativa|proposi[cç][aã]o|assertiva|enunciado)\b[^.!?]{0,100}?\b(?:é|está|estava|permanece|foi)?\s*(certo|certa|correto|correta|errado|errada|incorreto|incorreta)\b/gi)];
-    const conclusao = conclusoes.at(-1)?.[1];
-    if (conclusao) q.gabarito = /errad|incorret/i.test(conclusao) ? 'Errado' : 'Certo';
-  }
-  if (!q.gabarito && q.comentario) {
-    const texto = q.comentario.replace(/\s+/g, ' ');
-    const padroes = [
-      /(?:gabarito|resposta(?:\s+correta)?|alternativa\s+(?:correta|certa)|op[cç][aã]o\s+(?:correta|certa))\s*(?:(?:oficial(?:\s+da\s+banca)?|da\s+banca)\s*)?(?::|[-–—]|é)?\s*(?:(?:a\s+)?(?:letra|alternativa|op[cç][aã]o)\s*)?\(?([A-J])\)?\b/i,
-      /(?:letra|alternativa|op[cç][aã]o)\s*([A-J])\s*(?:é|está)?\s*(?:a\s*)?(?:correta|certa)\b/i,
-    ];
-    for (const pattern of padroes) {
-      const resposta = pattern.exec(texto)?.[1];
-      if (resposta) { q.gabarito = resposta.toUpperCase(); break; }
-    }
+    q.gabarito = q.tipo === 'CERTO_ERRADO'
+      ? opcoes[numero - 1]
+      : String.fromCharCode(64 + numero);
   }
   return q;
 }
