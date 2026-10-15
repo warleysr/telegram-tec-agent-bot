@@ -73,6 +73,95 @@ if [[ ! "$BOT_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then echo "Informe um ou mais
 read -r -p "URL HTTPS pública para o login TEC (ex.: https://bot.seudominio.com/tec-login): " BOT_LOGIN_BASE_URL
 printf '\n'
 if [[ ! "$BOT_LOGIN_BASE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/tec-login/?$ ]]; then echo "Use uma URL HTTPS pública terminada em /tec-login." >&2; exit 1; fi
+PUBLIC_HOST="${BOT_LOGIN_BASE_URL#https://}"
+PUBLIC_HOST="${PUBLIC_HOST%%/*}"
+PUBLIC_HOST="${PUBLIC_HOST%%:*}"
+
+configure_proxy() {
+  echo "Configurando HTTPS e proxy para ${PUBLIC_HOST}..."
+  if systemctl is-active --quiet nginx; then
+    apt-get install -y certbot python3-certbot-nginx
+    local site=/etc/nginx/sites-available/telegram-tec-bot
+    if [[ -e "$site" ]] && ! grep -q '# telegram-tec-bot managed' "$site"; then
+      echo "Já existe $site sem marca de gerenciamento; não vou sobrescrevê-lo." >&2
+      exit 1
+    fi
+    cat > "$site" <<EOF
+# telegram-tec-bot managed
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${PUBLIC_HOST};
+    location /tec-login {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    location /tec-vnc/ {
+        proxy_pass http://127.0.0.1:6080/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
+}
+EOF
+    ln -sfn "$site" /etc/nginx/sites-enabled/telegram-tec-bot
+    nginx -t
+    systemctl reload nginx
+    certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email --redirect -d "$PUBLIC_HOST"
+  elif systemctl is-active --quiet apache2; then
+    apt-get install -y certbot python3-certbot-apache
+    a2enmod proxy proxy_http proxy_wstunnel headers >/dev/null
+    local site=/etc/apache2/sites-available/telegram-tec-bot.conf
+    if [[ -e "$site" ]] && ! grep -q '# telegram-tec-bot managed' "$site"; then
+      echo "Já existe $site sem marca de gerenciamento; não vou sobrescrevê-lo." >&2
+      exit 1
+    fi
+    cat > "$site" <<EOF
+# telegram-tec-bot managed
+<VirtualHost *:80>
+    ServerName ${PUBLIC_HOST}
+    ProxyPreserveHost On
+    ProxyPass /tec-login http://127.0.0.1:8088/tec-login
+    ProxyPassReverse /tec-login http://127.0.0.1:8088/tec-login
+    ProxyPass /tec-vnc/ ws://127.0.0.1:6080/
+    ProxyPassReverse /tec-vnc/ ws://127.0.0.1:6080/
+</VirtualHost>
+EOF
+    a2ensite telegram-tec-bot.conf >/dev/null
+    apache2ctl configtest
+    systemctl reload apache2
+    certbot --apache --non-interactive --agree-tos --register-unsafely-without-email --redirect -d "$PUBLIC_HOST"
+  else
+    if ! command -v caddy >/dev/null; then
+      apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+      chmod 0644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+      apt_update
+      apt-get install -y caddy
+    fi
+    install -d -m 0755 /etc/caddy/sites
+    touch /etc/caddy/Caddyfile
+    grep -Fq 'import /etc/caddy/sites/*.caddy' /etc/caddy/Caddyfile || echo 'import /etc/caddy/sites/*.caddy' >> /etc/caddy/Caddyfile
+    cat > /etc/caddy/sites/telegram-tec-bot.caddy <<EOF
+${PUBLIC_HOST} {
+    handle /tec-login* {
+        reverse_proxy 127.0.0.1:8088
+    }
+    handle_path /tec-vnc/* {
+        reverse_proxy 127.0.0.1:6080
+    }
+}
+EOF
+    caddy validate --config /etc/caddy/Caddyfile
+    systemctl enable --now caddy
+    systemctl reload caddy
+  fi
+}
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -122,7 +211,8 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now "${APP}.service"
+configure_proxy
 echo
 echo "Instalação concluída. Acompanhe com: journalctl -u ${APP} -f"
-echo "Configure o proxy HTTPS para /tec-login -> 127.0.0.1:8088 e /tec-vnc/* -> 127.0.0.1:6080 (WebSocket)."
+echo "Proxy HTTPS ativo em https://${PUBLIC_HOST}; verifique se o DNS aponta para esta VPS e se as portas 80/443 estão liberadas."
 echo "Depois envie /login ao bot no privado para conectar a sessão TEC pelo navegador do celular."

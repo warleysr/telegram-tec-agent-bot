@@ -18,32 +18,7 @@ O script pedirá:
 2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
 3. A URL HTTPS pública que será usada no login, terminada em `/tec-login` (por exemplo, `https://bot.seudominio.com/tec-login`).
 
-O instalador prepara Chromium, Xvfb, x11vnc e Websockify. Depois, configure o proxy do seu domínio para os caminhos abaixo e envie `/login` ao bot no privado:
-
-```caddyfile
-bot.seudominio.com {
-    handle /tec-login* {
-        reverse_proxy 127.0.0.1:8088
-    }
-    handle_path /tec-vnc/* {
-        reverse_proxy 127.0.0.1:6080
-    }
-}
-```
-
-Se já usa Nginx, configure os locais equivalentes, incluindo upgrade de WebSocket em `/tec-vnc/`:
-
-```nginx
-location /tec-login {
-    proxy_pass http://127.0.0.1:8088;
-}
-location /tec-vnc/ {
-    proxy_pass http://127.0.0.1:6080/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-}
-```
+O instalador prepara Chromium, Xvfb, x11vnc e Websockify e configura o proxy HTTPS automaticamente. Ele detecta Nginx ou Apache em execução, cria um host virtual para o domínio informado e solicita um certificado HTTPS; se nenhum deles estiver ativo, instala e configura o Caddy, que emite o certificado automaticamente. O DNS do domínio deve apontar para a VPS, e as portas 80 e 443 precisam estar acessíveis. Depois, envie `/login` ao bot no privado.
 
 Depois, acompanhe o serviço com:
 
@@ -91,7 +66,7 @@ sudo install -m 0644 bot.mjs /opt/telegram-tec-bot/bot.mjs
 sudo systemctl restart telegram-tec-bot
 ```
 
-Para uma instalação anterior, atualize `BOT_ADMIN_IDS` e `BOT_LOGIN_BASE_URL` em `/etc/telegram-tec-bot.env`, instale Chromium, Xvfb, x11vnc e Websockify e configure o proxy HTTPS acima. Reinicie o serviço depois.
+Para uma instalação anterior, atualize `BOT_ADMIN_IDS` e `BOT_LOGIN_BASE_URL` em `/etc/telegram-tec-bot.env`, instale Chromium, Xvfb, x11vnc e Websockify e configure o proxy HTTPS. Reinicie o serviço depois.
 
 ## Dados e credenciais
 
