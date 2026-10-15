@@ -23,15 +23,15 @@ sudo journalctl -u telegram-tec-bot -f
 
 Requisitos: Ubuntu/Debian com Apache e certificado já configurados, `systemd`, Git, Python 3 e Node.js 20+. O instalador ativa os módulos `proxy` e `proxy_http` do Apache. Não precisa abrir outra porta pública; o bot escuta somente em `127.0.0.1:8088`.
 
-## Extensão Chrome no Windows
+## Extensão no Chrome ou Helium (Windows)
 
-Instale a extensão no mesmo perfil do Chrome em que você acessa o TEC:
+Instale a extensão no mesmo perfil do Chrome ou Helium em que você acessa o TEC:
 
 1. Baixe ou clone este repositório no PC e extraia os arquivos.
-2. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e clique em **Carregar sem compactação**.
+2. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e clique em **Carregar sem compactação**. No Helium, use a mesma página de extensões Chromium.
 3. Selecione a pasta `extension` do repositório.
 4. No Telegram, abra uma conversa privada com o bot e envie `/login`.
-5. Clique no ícone da extensão **TEC Session Sync**, cole o código enviado pelo bot e clique em **Parear e sincronizar**.
+5. Clique no ícone da extensão **TEC Session Sync**. A tela de pareamento abrirá em uma aba; cole o código enviado pelo bot e clique em **Parear ou trocar conexão**.
 
 O pareamento é feito uma vez por instalação da extensão. Depois, quando o TEC criar ou renovar os cookies de autenticação no Chrome, a extensão os envia automaticamente para a VPS por HTTPS. **Sincronizar agora** permite reenviar manualmente após fazer login. A extensão também mostra se o envio foi validado pelo TEC.
 

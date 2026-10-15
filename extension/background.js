@@ -65,3 +65,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch(error => sendResponse({ ok: false, error: error.message }));
   return true;
 });
+
+// Use a regular extension tab instead of the toolbar popup. This is more reliable
+// in Chromium forks and also keeps the pairing form usable in narrow popups.
+chrome.action.onClicked.addListener(() => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
+});
