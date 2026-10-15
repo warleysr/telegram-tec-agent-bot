@@ -124,8 +124,10 @@ block = f'''    {marker}
     ProxyPreserveHost On
     ProxyPass /tec-login http://127.0.0.1:8088/tec-login
     ProxyPassReverse /tec-login http://127.0.0.1:8088/tec-login
-    ProxyPass /tec-vnc/ ws://127.0.0.1:6080/
-    ProxyPassReverse /tec-vnc/ ws://127.0.0.1:6080/
+    ProxyPass /tec-vnc/websockify ws://127.0.0.1:6080/websockify
+    ProxyPassReverse /tec-vnc/websockify ws://127.0.0.1:6080/websockify
+    ProxyPass /tec-vnc/ http://127.0.0.1:6080/
+    ProxyPassReverse /tec-vnc/ http://127.0.0.1:6080/
 '''
 for path in glob.glob('/etc/apache2/sites-enabled/*'):
     try:
