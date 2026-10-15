@@ -63,8 +63,6 @@ if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
 else
   if ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null; then apt-get install -y chromium; fi
 fi
-NODE_BIN="$(command -v node)"
-
 read -r -s -p "Token do bot (BotFather): " TELEGRAM_BOT_TOKEN
 printf '\n'
 if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then echo "Token vazio." >&2; exit 1; fi
@@ -191,6 +189,9 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 install -d -o root -g root -m 0755 "$APP_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$DATA_DIR" "$DATA_DIR/tec"
+NODE_SOURCE="$(command -v node)"
+NODE_BIN="$APP_DIR/node"
+install -m 0755 "$NODE_SOURCE" "$NODE_BIN"
 install -m 0644 "$SCRIPT_DIR/bot.mjs" "$APP_DIR/bot.mjs"
 install -m 0644 "$SCRIPT_DIR/package.json" "$APP_DIR/package.json"
 install -m 0644 "$SCRIPT_DIR/README.md" "$APP_DIR/README.md"
