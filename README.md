@@ -1,10 +1,10 @@
 # Bot Telegram para TEC Concursos
 
-Bot em Node.js 20+ que reutiliza `TecClient` e `TecApi` do [tec-agent](https://github.com/warleysr/tec-agent). O histórico de respostas fica local no bot e não altera o progresso no site TEC.
+Bot em Node.js 20+ que usa o [tec-agent](https://github.com/warleysr/tec-agent) para obter cadernos e questões. As respostas e o progresso do quiz ficam no Telegram e não alteram o histórico de resolução do site TEC.
 
-## Instalação automática na VPS
+## Instalação na VPS
 
-Compatível com VPS Linux que use `systemd`. Requer Node.js 20+, Git e acesso de saída à internet. O instalador cria um usuário de serviço sem login, instala o projeto em `/opt`, configura o `systemd` e mantém token, sessão e progresso em diretórios restritos.
+O instalador configura o serviço `systemd` e a rota HTTPS do callback no Apache. Ele pressupõe que a VPS já tenha Apache com certificado HTTPS para `blackgroup.com.br` e que esse domínio seja o usado pela extensão. O Apache precisa estar ativo e ter um `VirtualHost *:443` com `ServerName` ou `ServerAlias blackgroup.com.br`.
 
 ```bash
 git clone https://github.com/warleysr/telegram-tec-agent-bot.git
@@ -12,83 +12,73 @@ cd telegram-tec-agent-bot
 sudo bash install.sh
 ```
 
-O script pedirá:
+Na primeira instalação, informe o token do `@BotFather` e o ID Telegram do administrador. Em atualizações, o instalador preserva esses dados de `/etc/telegram-tec-bot.env`. Ele instala o `tec-agent`, configura o proxy Apache para `https://blackgroup.com.br/tec-login` e inicia o bot.
 
-1. O token criado no `@BotFather` (entrada oculta).
-2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
-
-O instalador copia o executável Node para a pasta do serviço (inclusive quando o Node veio do NVM em `/root`) e configura o `systemd`. Depois da instalação, envie `/login` ao bot no privado para atualizar a sessão.
-
-Depois, acompanhe o serviço com:
+Confira a instalação:
 
 ```bash
 sudo systemctl status telegram-tec-bot
 sudo journalctl -u telegram-tec-bot -f
 ```
 
-O instalador não instala Node.js nem Git. Instale Node.js 20 ou superior e Git antes de executá-lo. Em distribuições Debian/Ubuntu, `apt install git` instala o Git; confira a versão do Node com `node --version`.
+Requisitos: Ubuntu/Debian com Apache e certificado já configurados, `systemd`, Git, Python 3 e Node.js 20+. O instalador ativa os módulos `proxy` e `proxy_http` do Apache. Não precisa abrir outra porta pública; o bot escuta somente em `127.0.0.1:8088`.
+
+## Extensão Chrome no Windows
+
+Instale a extensão no mesmo perfil do Chrome em que você acessa o TEC:
+
+1. Baixe ou clone este repositório no PC e extraia os arquivos.
+2. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e clique em **Carregar sem compactação**.
+3. Selecione a pasta `extension` do repositório.
+4. No Telegram, abra uma conversa privada com o bot e envie `/login`.
+5. Clique no ícone da extensão **TEC Session Sync**, cole o código enviado pelo bot e clique em **Parear e sincronizar**.
+
+O pareamento é feito uma vez por instalação da extensão. Depois, quando o TEC criar ou renovar os cookies de autenticação no Chrome, a extensão os envia automaticamente para a VPS por HTTPS. **Sincronizar agora** permite reenviar manualmente após fazer login. A extensão também mostra se o envio foi validado pelo TEC.
+
+O bot testa a sessão antes de salvá-la. Se a sessão expirar ou for substituída, o bot avisa para entrar no TEC pelo Chrome e sincronizar novamente. `/login` só é necessário para parear a extensão ou pareá-la de novo. Os cookies e o token de pareamento trafegam via HTTPS; não os envie em mensagens.
 
 ## Comandos do bot
 
-- `/caderno LINK` carrega um caderno acessível pela sessão TEC.
-- `/proxima` abre a primeira questão ainda não respondida por você no chat.
-- `/aleatoria` escolhe entre suas questões não respondidas.
-- `/status` mostra seu progresso.
-- `/lista` abre a navegação por pastas, subpastas e cadernos, com botões de seleção.
-- `/login` inicia uma atualização temporária da sessão. Entre no TEC normalmente, execute o favorito **Copiar cookies TEC**, e cole a mensagem na conversa privada com o bot. O bot tenta apagar a mensagem e valida a sessão com `whoami()` antes de salvá-la.
-- `/id` mostra seu ID Telegram para configurar permissões administrativas.
+- `/lista` navega por pastas, subpastas e cadernos da conta TEC.
+- `/caderno LINK` carrega um caderno pelo link.
+- `/proxima` abre a próxima questão ainda não respondida por você naquele chat.
+- `/aleatoria` escolhe uma questão não respondida aleatoriamente.
+- `/status` mostra seu progresso no Telegram.
+- `/login` gera o código de pareamento da extensão (administrador, em conversa privada).
+- `/id` mostra seu ID Telegram.
 
-Cada questão chega como quiz do Telegram, que indica acerto ou erro e oferece o botão **Ver comentário**. A descrição da prova aparece em negrito antes do enunciado; os botões **Próxima** e **Aleatória** ficam logo abaixo do quiz. Em grupos, o progresso é separado por usuário e chat. Respostas no Telegram não são sincronizadas com o TEC.
+Cada questão chega como quiz do Telegram, com indicação de acerto ou erro, botão **Ver comentário** e botões **Próxima** e **Aleatória**. Em grupos, várias pessoas podem responder; o progresso é individual por usuário e chat.
 
-Exemplo:
+Exemplos:
 
-```
+```text
 /caderno https://www.tecconcursos.com.br/questoes/cadernos/12345678
 /proxima
 /aleatoria
 /status
-/lista
 ```
 
-### Criar o favorito para copiar cookies
+## Atualizar
 
-1. Copie a linha de [tec-cookies-bookmarklet.txt](tec-cookies-bookmarklet.txt).
-2. Crie um favorito chamado **Copiar cookies TEC** e cole a linha inteira no campo de endereço/URL do favorito.
-3. Faça login normalmente no TEC. Na página do TEC, execute esse favorito; os cookies acessíveis serão copiados para a área de transferência. Se o navegador bloquear a cópia, o favorito abre uma caixa para copiar manualmente.
-4. No Telegram, envie `/login` ao bot no privado e cole o conteúdo copiado.
-
-O progresso das questões do TEC não é alterado. **Limitação do navegador:** bookmarklets não conseguem ler cookies `HttpOnly`. Se o cookie necessário estiver marcado assim, o TEC não fornecerá uma sessão válida pelo favorito e o bot recusará o conteúdo; o favorito não contorna essa proteção. O bot não salva cookies sem validar a sessão.
-
-O bot usa long polling, sem necessidade de abrir uma porta ou configurar webhook. Os comandos funcionam em grupos com o modo privacy padrão do Telegram.
-
-## Atualizar o bot
-
-Na VPS, obtenha a versão nova e reinicie o serviço:
+Na VPS, execute novamente o instalador para atualizar o bot, a extensão implantada no PC e o proxy. As credenciais são preservadas:
 
 ```bash
-cd telegram-tec-agent-bot
+cd /var/www/html/telegram-tec-agent-bot
 git pull
-sudo install -m 0644 bot.mjs package.json README.md /opt/telegram-tec-bot/
-sudo install -m 0644 tec-cookies-bookmarklet.txt /opt/telegram-tec-bot/
-sudo install -m 0755 "$(command -v node)" /opt/telegram-tec-bot/node
-sudo sed -i 's#^ExecStart=.*#ExecStart=/opt/telegram-tec-bot/node /opt/telegram-tec-bot/bot.mjs#' /etc/systemd/system/telegram-tec-bot.service
-sudo systemctl daemon-reload
-sudo systemctl restart telegram-tec-bot
+sudo bash install.sh
 ```
 
-Para instalações anteriores com o login remoto, esta versão não usa mais a rota `/tec-login` nem o proxy WebSocket. O serviço pode ser reiniciado sem Chromium, Xvfb ou VNC.
+Depois de atualizar, carregue novamente a pasta `extension` em `chrome://extensions` (botão **Recarregar**) para aplicar a nova versão no Chrome.
 
-## Dados e credenciais
+## Dados e limites
 
-- Token: `/etc/telegram-tec-bot.env` (permissão `0600`).
+- Configuração e token Telegram: `/etc/telegram-tec-bot.env` (permissão `0600`).
 - Sessão TEC e progresso: `/var/lib/telegram-tec-bot/`.
+- Estado do pareamento: `/var/lib/telegram-tec-bot/bot-state.json` (token da extensão armazenado como hash).
 - Logs: `journalctl -u telegram-tec-bot`.
+- O navegador e o bot compartilham cookies de sessão; a extensão não cria uma segunda sessão TEC. Como o TEC pode invalidar sessões ou renovar cookies no servidor, sincronize de novo se o bot avisar que a sessão ficou inválida.
+- O domínio configurado na extensão é `blackgroup.com.br`. Em outro domínio, ajuste `API_BASE` em `extension/background.js` e `extension/popup.js`, o `host_permissions` em `extension/manifest.json` e `PUBLIC_DOMAIN` no `install.sh`.
+- O caderno precisa estar acessível à conta autenticada e conter um ID numérico em `/questoes/cadernos/ID`.
+- Questões sem gabarito fornecido pelo TEC são ignoradas pelo bot.
 
-Faça backup de `/var/lib/telegram-tec-bot/` para preservar a sessão e os históricos. Não publique esses dados.
-
-## Limitações
-
-- O link precisa ser direto e conter um ID numérico (`/questoes/cadernos/ID`). Links curtos `/s/...` e `/caderno/...` ainda não são resolvidos.
-- Um bookmarklet só pode copiar cookies que o navegador expõe a JavaScript; cookies `HttpOnly` não podem ser lidos por esse método.
-- A sessão do tec-agent precisa ter acesso ao caderno e a listagem deve informar a quantidade de questões.
-- Se o tec-agent não identificar o gabarito, o bot interrompe o envio daquela questão para evitar uma correção errada.
+Faça backup de `/var/lib/telegram-tec-bot/` para preservar sessão e progresso. Não publique esses dados.

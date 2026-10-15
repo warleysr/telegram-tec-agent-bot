@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "TEC Session Sync",
+  "version": "1.0.0",
+  "description": "Sincroniza a sessão do TEC com seu bot privado na VPS.",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": [
+    "https://www.tecconcursos.com.br/*",
+    "https://*.tecconcursos.com.br/*",
+    "https://blackgroup.com.br/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Sincronizar sessão TEC",
+    "default_popup": "popup.html"
+  }
+}

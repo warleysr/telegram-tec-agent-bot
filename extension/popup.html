@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TEC Session Sync</title>
+<style>
+  body { width: 300px; margin: 0; padding: 16px; color: #17232d; font: 14px system-ui, sans-serif; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+  p { line-height: 1.4; }
+  input, button { box-sizing: border-box; width: 100%; margin-top: 8px; padding: 10px; font: inherit; }
+  input { border: 1px solid #aab4bc; border-radius: 6px; }
+  button { border: 0; border-radius: 6px; background: #087caf; color: white; font-weight: 600; }
+  #status { min-height: 40px; color: #3f4b55; overflow-wrap: anywhere; }
+</style>
+<h1>TEC Session Sync</h1>
+<p>Após o pareamento, novos logins no TEC serão enviados automaticamente à sua VPS.</p>
+<section id="pairing">
+  <label for="code">Código recebido no Telegram após /login</label>
+  <input id="code" autocomplete="off" spellcheck="false" placeholder="Código temporário">
+  <button id="pair">Parear e sincronizar</button>
+</section>
+<button id="sync" hidden>Sincronizar agora</button>
+<p id="status" role="status"></p>
+<script src="popup.js"></script>
+</html>

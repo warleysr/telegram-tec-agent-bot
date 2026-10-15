@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -8,7 +10,7 @@ if (!token) throw new Error('Defina TELEGRAM_BOT_TOKEN.');
 const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent');
 process.env.TEC_AGENT_HOME ||= tecDir;
 const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
-const { TecClient, Session } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
+const { TecClient, Session, AuthError } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
 const { TecApi } = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
 const { importCookies } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
 const session = Session.load(path.join(tecDir, 'session.json'));
@@ -18,7 +20,7 @@ const base = `https://api.telegram.org/bot${token}`;
 const stateFile = path.resolve(process.env.BOT_DATA_DIR || '.', 'bot-state.json');
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { chats: {}, polls: {} };
 const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
-const loginPending = new Map();
+const loginPairs = new Map();
 let offset = 0;
 
 function save() {
@@ -38,13 +40,73 @@ async function importLogin(cookieText) {
   try {
     importCookies(new TecClient({ session: trial }), cookieText);
     if (!(await new TecClient({ session: trial }).whoami()).logged) {
-      throw new Error('O TEC não aceitou os cookies. O bookmarklet só copia cookies acessíveis ao JavaScript; cookies HttpOnly precisam de outro método.');
+      throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
     }
     session.cookies = trial.cookies;
-    session.meta = { via: 'bookmarklet', at: new Date().toISOString() };
+    session.meta = { via: 'chrome-extension-sync', at: new Date().toISOString() };
     session.save();
   } finally { trial.clear(); }
 }
+
+function sessionHelp() {
+  return 'A sessão TEC sincronizada expirou ou foi substituída. Faça login no TEC pelo Chrome com a extensão instalada; ela enviará a sessão nova automaticamente. Se ainda não pareou, envie /login ao bot no privado.';
+}
+function errorText(error) {
+  return error instanceof AuthError ? sessionHelp() : `Erro: ${error.message}`;
+}
+
+const loginServer = createServer(async (req, res) => {
+  const headers = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-headers': 'content-type, authorization',
+    'cache-control': 'no-store',
+    'content-type': 'application/json; charset=utf-8',
+  };
+  if (req.method === 'OPTIONS' && ['/tec-login/pair', '/tec-login/sync'].includes(req.url)) {
+    res.writeHead(204, headers); return res.end();
+  }
+  if (req.method !== 'POST' || !['/tec-login/pair', '/tec-login/sync'].includes(req.url)) {
+    res.writeHead(404, headers); return res.end(JSON.stringify({ error: 'Rota não encontrada.' }));
+  }
+  try {
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 32_000) { res.writeHead(413, headers); return res.end(JSON.stringify({ error: 'Solicitação muito grande.' })); }
+    }
+    const payload = JSON.parse(body);
+    if (req.url === '/tec-login/pair') {
+      const code = String(payload.code || '');
+      const pair = loginPairs.get(code);
+      if (!pair || pair.expiresAt < Date.now()) { res.writeHead(401, headers); return res.end(JSON.stringify({ error: 'Código inválido ou expirado. Envie /login ao bot novamente.' })); }
+      loginPairs.delete(code);
+      const deviceToken = randomBytes(32).toString('base64url');
+      state.extensionTokenHash = createHash('sha256').update(deviceToken).digest('hex');
+      state.extensionPairedAt = new Date().toISOString();
+      save();
+      res.writeHead(200, headers); return res.end(JSON.stringify({ ok: true, token: deviceToken }));
+    }
+
+    const suppliedToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const expectedHash = state.extensionTokenHash;
+    const suppliedHash = createHash('sha256').update(suppliedToken).digest();
+    const expected = /^[a-f0-9]{64}$/i.test(expectedHash || '') ? Buffer.from(expectedHash, 'hex') : Buffer.alloc(32);
+    if (suppliedToken.length < 40 || suppliedToken.length > 100 || !timingSafeEqual(suppliedHash, expected)) {
+      res.writeHead(401, headers); return res.end(JSON.stringify({ error: 'Extensão não pareada. Envie /login ao bot e pareie novamente.' }));
+    }
+    if (typeof payload.cookies !== 'string' || payload.cookies.length > 24_000) {
+      res.writeHead(400, headers); return res.end(JSON.stringify({ error: 'Cookies ausentes ou inválidos.' }));
+    }
+    await importLogin(payload.cookies);
+    state.extensionSyncedAt = new Date().toISOString();
+    save();
+    res.writeHead(200, headers); return res.end(JSON.stringify({ ok: true, syncedAt: state.extensionSyncedAt }));
+  } catch (error) {
+    console.error(`Sincronização TEC falhou: ${error.message}`);
+    res.writeHead(401, headers); return res.end(JSON.stringify({ error: error.message || 'Não foi possível validar a sessão TEC.' }));
+  }
+});
 const chatKey = (id) => String(id);
 function privateChat(chat) { return chat.type === 'private'; }
 function compact(text = '') { return String(text).replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]*\n+/g, '\n').replace(/\n{2,}/g, '\n').trim(); }
@@ -232,31 +294,22 @@ async function handleMessage(m) {
   const [cmd, ...args] = m.text.trim().split(/\s+/);
   const chat = m.chat, user = m.from;
   try {
-    const pending = loginPending.get(String(user.id));
-    if (pending && pending.chatId === String(chat.id) && privateChat(chat) && Date.now() < pending.expiresAt && !cmd.startsWith('/')) {
-      loginPending.delete(String(user.id));
-      await tg('deleteMessage', { chat_id: chat.id, message_id: m.message_id }).catch(() => {});
-      try {
-        await importLogin(m.text);
-        return tg('sendMessage', { chat_id: chat.id, text: 'Sessão TEC atualizada e validada. O bot já pode buscar questões e cadernos.' });
-      } catch (error) {
-        return tg('sendMessage', { chat_id: chat.id, text: `Não consegui atualizar a sessão: ${error.message}` });
-      }
-    }
     if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
     if (cmd === '/id' || cmd.startsWith('/id@')) return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
     if (cmd === '/login' || cmd.startsWith('/login@')) {
       if (!admins.has(String(user.id))) throw new Error('Este comando é restrito aos administradores configurados na VPS.');
       if (!privateChat(chat)) throw new Error('Por segurança, envie /login em uma conversa privada com o bot.');
-      loginPending.set(String(user.id), { chatId: String(chat.id), expiresAt: Date.now() + 5 * 60_000 });
+      for (const [oldCode, pending] of loginPairs) if (pending.userId === String(user.id)) loginPairs.delete(oldCode);
+      const code = randomBytes(18).toString('base64url');
+      const pair = { userId: String(user.id), chatId: String(chat.id), expiresAt: Date.now() + 5 * 60_000 };
+      loginPairs.set(code, pair);
       setTimeout(() => {
-        const pending = loginPending.get(String(user.id));
-        if (pending?.chatId === String(chat.id) && Date.now() >= pending.expiresAt) {
-          loginPending.delete(String(user.id));
-          void tg('sendMessage', { chat_id: chat.id, text: 'O pedido de login expirou. Envie /login novamente.' }).catch(() => {});
+        if (loginPairs.get(code) === pair && Date.now() >= pair.expiresAt) {
+          loginPairs.delete(code);
+          void tg('sendMessage', { chat_id: chat.id, text: 'O código de pareamento da extensão expirou. Envie /login novamente.' }).catch(() => {});
         }
       }, 5 * 60_000).unref();
-      return tg('sendMessage', { chat_id: chat.id, text: 'Depois de entrar no TEC, abra o favorito “Copiar cookies TEC” e envie aqui o conteúdo copiado. O bot valida os cookies antes de substituir a sessão. Este pedido expira em 5 minutos.' });
+      return tg('sendMessage', { chat_id: chat.id, text: `Código para parear a extensão TEC: ${code}\n\nNo Chrome do PC, abra TEC Session Sync e cole este código uma vez. Depois disso, novos logins no TEC serão sincronizados automaticamente com a VPS. O código expira em 5 minutos.` });
     }
     if (cmd === '/caderno' || cmd.startsWith('/caderno@')) {
       const id = cadernoId(args.join(' '));
@@ -274,7 +327,9 @@ async function handleMessage(m) {
       const skippedText = skipped ? ` ${skipped} sem gabarito retornado pelo TEC foram ignoradas.` : '';
       return tg('sendMessage', { chat_id: chat.id, text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.${skippedText}` : 'Nenhum caderno carregado neste chat.' });
     }
-  } catch (e) { await tg('sendMessage', { chat_id: chat.id, text: `Erro: ${e.message}` }); }
+  } catch (e) {
+    await tg('sendMessage', { chat_id: chat.id, text: errorText(e) });
+  }
 }
 async function handleUpdate(u) {
   if (u.message) await handleMessage(u.message);
@@ -312,7 +367,7 @@ async function handleUpdate(u) {
           await tg('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `Caderno selecionado: ${item.nome}\n${total} questões. Use /proxima ou /aleatoria.` });
         } else if (action === 'nop') { /* apenas indicador da página */ }
         await tg('answerCallbackQuery', { callback_query_id: cb.id });
-      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: e.message.slice(0, 180), show_alert: true }); }
+      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true }); }
     } else if (cb.data?.startsWith('c:')) {
       try {
         const q = await api.questao(cb.data.slice(2), { comentario: true });
@@ -320,15 +375,19 @@ async function handleUpdate(u) {
         const chunks = body.match(/[\s\S]{1,3800}/g) || ['Sem comentário.'];
         for (const chunk of chunks) await tg('sendMessage', { chat_id: cb.message.chat.id, text: chunk, reply_to_message_id: cb.message.message_id });
         await tg('answerCallbackQuery', { callback_query_id: cb.id });
-      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: e.message.slice(0, 180), show_alert: true }); }
+      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: errorText(e).slice(0, 180), show_alert: true }); }
     } else if (cb.data === 'q:n' || cb.data === 'q:r') {
       await tg('answerCallbackQuery', { callback_query_id: cb.id });
       try { await showQuestion(cb.message.chat, cb.from, cb.data === 'q:n' ? 'next' : 'random'); }
-      catch (e) { await tg('sendMessage', { chat_id: cb.message.chat.id, text: `Erro: ${e.message}` }); }
+      catch (e) { await tg('sendMessage', { chat_id: cb.message.chat.id, text: errorText(e) }); }
     }
   }
 }
-console.log(`Bot iniciado. Estado: ${stateFile}`);
+await new Promise((resolve, reject) => {
+  loginServer.once('error', reject);
+  loginServer.listen(Number(process.env.BOT_LOGIN_PORT || 8088), '127.0.0.1', resolve);
+});
+console.log(`Bot iniciado. Callback TEC em 127.0.0.1:${Number(process.env.BOT_LOGIN_PORT || 8088)}. Estado: ${stateFile}`);
 while (true) {
   try {
     const updates = await tg('getUpdates', { offset, timeout: 50, allowed_updates: ['message', 'poll_answer', 'callback_query'] });
