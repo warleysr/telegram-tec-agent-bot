@@ -1,10 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { chromium } from 'playwright-core';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('Defina TELEGRAM_BOT_TOKEN.');
@@ -13,7 +14,6 @@ process.env.TEC_AGENT_HOME ||= tecDir;
 const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
 const { TecClient, Session } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
 const { TecApi } = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
-const { loginBrowser } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
 const session = Session.load(path.join(tecDir, 'session.json'));
 const client = new TecClient({ session });
 const api = new TecApi(client);
@@ -25,7 +25,6 @@ const loginBaseUrl = process.env.BOT_LOGIN_BASE_URL || '';
 const loginPort = Number(process.env.BOT_LOGIN_PORT || 8088);
 const loginAttempts = new Map();
 let activeLogin = null;
-let loginTunnel = null;
 let offset = 0;
 
 function save() {
@@ -40,100 +39,156 @@ async function tg(method, payload = {}) {
   if (!data.ok) throw new Error(data.description || `Telegram ${method} falhou`);
   return data.result;
 }
-function htmlPage(attempt) {
-  const ws = new URL(loginBaseUrl);
-  const wsUrl = `wss://${ws.host}/tec-vnc/websockify`;
-  const password = JSON.stringify(attempt.vncPassword);
-  const wsJson = JSON.stringify(wsUrl);
+function htmlPage() {
   return `<!doctype html><html lang="pt-BR"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta charset="utf-8"><title>Login TEC</title><style>
-    *{box-sizing:border-box}body{margin:0;background:#101820;color:#fff;font:16px system-ui,sans-serif}header{padding:14px 16px;background:#17232d;position:sticky;top:0;z-index:1}h1{font-size:18px;margin:0 0 4px}p{font-size:14px;color:#c9d4dc;margin:4px 0}#status{color:#9fe6b8}#screen{width:100vw;height:calc(100dvh - 90px);touch-action:none;overflow:hidden}canvas{width:100%;height:100%;object-fit:contain}button{padding:8px 12px;border:0;border-radius:8px;background:#3979f6;color:white;font-weight:600}
-    </style><header><h1>Conectar ao TEC</h1><p>Faça login normalmente nesta janela. O bot captura a sessão após a confirmação do TEC.</p><p id="status">Preparando conexão segura…</p></header><div id="screen"></div><script type="module">
-      const status=document.getElementById('status');
-      window.addEventListener('error',e=>{status.textContent='Falha ao carregar a tela remota: '+e.message;});
-      window.addEventListener('unhandledrejection',e=>{status.textContent='Falha ao iniciar a tela remota: '+(e.reason?.message||e.reason);});
-      let rfb;
-      try {
-        const module=await import('/tec-vnc/core/rfb.js');
-        const RFB=module.default||module.RFB;
-        if(!RFB) throw new Error('A biblioteca noVNC não exportou RFB.');
-        rfb=new RFB(document.getElementById('screen'),${wsJson},{credentials:{password:${password}}});
-        rfb.scaleViewport=true; rfb.resizeSession=false;
-        rfb.addEventListener('connect',()=>status.textContent='Conectado. Entre na sua conta TEC.');
-        rfb.addEventListener('disconnect',e=>status.textContent=e.detail.clean?'Conexão encerrada.':'Conexão interrompida; recarregue o link se ele ainda não expirou.');
-        rfb.addEventListener('credentialsrequired',()=>rfb.sendCredentials({password:${password}}));
-      } catch(e) { status.textContent='Falha ao iniciar a tela remota: '+e.message; }
-      async function check(){try{const r=await fetch(location.pathname+'/status'+location.search,{cache:'no-store'});const d=await r.json();if(d.status==='success'){status.textContent='Login confirmado! Você já pode fechar esta página.';return;}if(d.status==='failed'||d.status==='expired'){status.textContent=d.message;return;}}catch{}setTimeout(check,2500)}check();
+    *{box-sizing:border-box}body{margin:0;background:#111;color:#fff;font:15px system-ui,sans-serif;display:flex;flex-direction:column;height:100dvh}header{padding:10px 14px;background:#17232d;flex:none}h1{font-size:18px;margin:0 0 3px}#status{color:#9fe6b8;margin:0}#screen{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;background:#222}canvas{display:block;max-width:100%;max-height:100%;touch-action:none}footer{display:flex;gap:8px;padding:8px;background:#17232d;flex:none}input{min-width:0;flex:1;font:16px system-ui;padding:10px;border-radius:8px;border:0}button{padding:8px 14px;border:0;border-radius:8px;background:#3979f6;color:white;font-weight:600}
+    </style><header><h1>Conectar ao TEC</h1><p id="status">Conectando ao navegador seguro…</p></header><main id="screen"><canvas id="view"></canvas></main><footer><input id="typing" type="text" placeholder="Toque em um campo no TEC e digite aqui" autocomplete="off" autocapitalize="off"><button id="send">Enviar</button></footer><script>
+      const status=document.getElementById('status'), canvas=document.getElementById('view'), ctx=canvas.getContext('2d'), screen=document.getElementById('screen'), input=document.getElementById('typing');
+      const token=location.hash.slice(1); history.replaceState(null,'',location.pathname);
+      const scheme=location.protocol==='https:'?'wss:':'ws:', ws=new WebSocket(scheme+'//'+location.host+location.pathname.replace(/\\/$/,'')+'/ws'); let image=null;
+      ws.onopen=()=>ws.send(JSON.stringify({type:'auth',token}));
+      ws.onmessage=ev=>{const m=JSON.parse(ev.data); if(m.type==='status'){status.textContent=m.text;return;} if(m.type==='frame'){const img=new Image();img.onload=()=>{canvas.width=img.width;canvas.height=img.height;image=img;fit();};img.src='data:image/jpeg;base64,'+m.data;}};
+      ws.onclose=e=>{if(!/confirmado|concluído|expirado|falhou/i.test(status.textContent))status.textContent=e.reason||'Conexão encerrada. Solicite um novo /login ao bot.';};
+      function fit(){if(!image)return;const scale=Math.min(screen.clientWidth/image.width,screen.clientHeight/image.height);canvas.style.width=(image.width*scale)+'px';canvas.style.height=(image.height*scale)+'px';ctx.drawImage(image,0,0);}
+      new ResizeObserver(fit).observe(screen);
+      function point(e){const r=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
+      let down;canvas.addEventListener('pointerdown',e=>down={x:e.clientX,y:e.clientY});canvas.addEventListener('pointerup',e=>{if(down&&Math.hypot(e.clientX-down.x,e.clientY-down.y)<12){const p=point(e);ws.send(JSON.stringify({type:'tap',...p}));}down=null;});canvas.addEventListener('pointercancel',()=>down=null);canvas.addEventListener('wheel',e=>{e.preventDefault();ws.send(JSON.stringify({type:'scroll',deltaY:e.deltaY}));},{passive:false});
+      let touchY;canvas.addEventListener('touchstart',e=>touchY=e.touches[0].clientY,{passive:true});canvas.addEventListener('touchend',e=>{if(touchY==null)return;const dy=touchY-e.changedTouches[0].clientY;if(Math.abs(dy)>12)ws.send(JSON.stringify({type:'scroll',deltaY:dy*2}));touchY=null;});
+      document.getElementById('send').onclick=()=>{if(input.value){ws.send(JSON.stringify({type:'text',text:input.value}));input.value='';}};
+      input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();document.getElementById('send').click();}});
     </script></html>`;
 }
-function sendJson(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-  res.end(JSON.stringify(value));
-}
 const loginPath = loginBaseUrl ? new URL(loginBaseUrl).pathname.replace(/\/+$/, '') : '';
-const loginServer = createServer((req, res) => {
-  const url = new URL(req.url || '/', 'http://127.0.0.1');
-  const tokenValue = url.searchParams.get('token') || '';
-  const attempt = loginAttempts.get(tokenValue);
-  if (!attempt || Date.now() > attempt.expiresAt) {
-    if (url.pathname === `${loginPath}/status`) return sendJson(res, 410, { status: 'expired', message: 'Link de login expirado. Envie /login ao bot para gerar outro.' });
-    res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-    return res.end('Link de login expirado. Gere outro pelo Telegram.');
+const loginSockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+let loginServer;
+const tecOrigin = 'https://www.tecconcursos.com.br';
+
+async function runBrowserLogin(attempt, ws) {
+  let browser;
+  const originalCookies = { ...client.session.cookies };
+  const status = (text) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'status', text })); };
+  const finish = async (message, ok = false) => {
+    attempt.status = ok ? 'success' : 'failed';
+    status(message);
+    await tg('sendMessage', { chat_id: attempt.chatId, text: ok ? 'Sessão TEC atualizada com sucesso. O bot já pode buscar questões e cadernos.' : `Não consegui concluir o login TEC: ${message}` }).catch(() => {});
+  };
+  try {
+    if (ws.readyState !== WebSocket.OPEN) throw new Error('Conexão da página já foi encerrada.');
+    status('Abrindo o TEC…');
+    const executablePath = process.env.CHROME_PATH || ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find(fs.existsSync);
+    if (!executablePath) throw new Error('Chromium/Chrome não encontrado na VPS.');
+    browser = await chromium.launch({ headless: false, executablePath, args: ['--no-first-run', '--no-default-browser-check'] });
+    attempt.browser = browser;
+    const context = await browser.newContext({ viewport: { width: 430, height: 932 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, locale: 'pt-BR' });
+    const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    attempt.input = async message => {
+      if (page.isClosed()) return;
+      if (message.type === 'tap' && Number.isFinite(message.x) && Number.isFinite(message.y)) {
+        const viewport = page.viewportSize();
+        await page.mouse.click(Math.round(message.x * viewport.width), Math.round(message.y * viewport.height));
+      } else if (message.type === 'scroll' && Number.isFinite(message.deltaY)) {
+        await page.mouse.wheel(0, Math.max(-1200, Math.min(1200, message.deltaY)));
+      } else if (message.type === 'text' && typeof message.text === 'string' && message.text.length <= 1000) {
+        await page.keyboard.insertText(message.text);
+      }
+    };
+    await cdp.send('Page.enable');
+    cdp.on('Page.screencastFrame', async ({ data, sessionId }) => {
+      try {
+        if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 2_000_000) ws.send(JSON.stringify({ type: 'frame', data }));
+      } catch { /* cliente desconectado; sempre confirmamos o frame para continuar */ }
+      finally { cdp.send('Page.screencastFrameAck', { sessionId }).catch(() => {}); }
+    });
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 65, maxWidth: 900, maxHeight: 1600, everyNthFrame: 2 });
+    await page.goto(`${tecOrigin}/login`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    status('Entre na sua conta TEC. Esta tela é transmitida em tempo real.');
+    const expiresAt = Date.now() + 10 * 60_000;
+    while (Date.now() < expiresAt && ws.readyState === WebSocket.OPEN) {
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+      if (page.isClosed()) throw new Error('A janela do TEC foi encerrada.');
+      const cookies = Object.fromEntries((await context.cookies(tecOrigin)).filter(c => /(?:^|\.)tecconcursos\.com\.br$/.test(c.domain)).map(c => [c.name, c.value]));
+      if (!cookies.TecPermanecerLogado) continue;
+      client.session.cookies = cookies;
+      if ((await client.whoami()).logged) {
+        client.session.meta = { via: 'browser-screencast', at: new Date().toISOString() };
+        client.session.save();
+        return finish('Login confirmado! Você já pode fechar esta página.', true);
+      }
+      client.session.cookies = { ...originalCookies };
+    }
+    if (ws.readyState !== WebSocket.OPEN) throw new Error('Conexão da página interrompida. Solicite outro /login.');
+    throw new Error('Tempo esgotado aguardando a confirmação do login.');
+  } catch (error) {
+    client.session.cookies = { ...originalCookies };
+    client.session.save();
+    await finish(error.message);
+    console.error(`Login TEC falhou: ${error.message}`);
+  } finally {
+    clearTimeout(attempt.expiryTimer);
+    if (browser) await browser.close().catch(() => {});
+    attempt.browser = null;
+    if (activeLogin === attempt) activeLogin = null;
+    setTimeout(() => loginAttempts.delete(attempt.token), 60_000).unref();
+    if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Login finalizado');
   }
-  if (url.pathname === `${loginPath}/status`) return sendJson(res, 200, { status: attempt.status, message: attempt.status === 'failed' ? 'O login não foi concluído. Gere um novo link pelo Telegram.' : undefined });
-  if (req.method !== 'GET' || url.pathname !== loginPath) {
-    res.writeHead(404, { 'cache-control': 'no-store' });
-    return res.end();
+}
+
+loginServer = createServer((req, res) => {
+  const requestPath = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+  if (requestPath !== loginPath || req.method !== 'GET') {
+    res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end('Rota não encontrada.');
   }
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
     'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'self'; connect-src 'self' wss:",
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' wss:; img-src data:;",
   });
-  res.end(htmlPage(attempt));
+  res.end(htmlPage());
 });
-function managedProcess(command, args, env) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: path.basename(command) === 'websockify' || command === 'x11vnc' ? 'inherit' : 'ignore', env: { ...process.env, ...env } });
-    child.once('spawn', () => resolve(child));
-    child.once('error', reject);
-  });
-}
-async function stopLoginTunnel() {
-  const children = loginTunnel || [];
-  loginTunnel = null;
-  for (const child of children.reverse()) if (child && child.exitCode === null) child.kill('SIGTERM');
-}
-async function startLoginTunnel(password) {
-  if (loginTunnel) throw new Error('Já existe um login TEC em andamento.');
-  const display = process.env.TEC_LOGIN_DISPLAY || ':99';
-  const children = [];
-  try {
-    // A tela em retrato ocupa melhor o espaço disponível no Telegram móvel.
-    children.push(await managedProcess('Xvfb', [display, '-screen', '0', '900x1600x24', '-nolisten', 'tcp', '-ac']));
-    await new Promise(resolve => setTimeout(resolve, 500));
-    children.push(await managedProcess('x11vnc', ['-display', display, '-forever', '-shared', '-rfbport', '5900', '-localhost', '-passwd', password, '-noxdamage', '-verbose']));
-    const websockifyBin = process.env.BOT_WEBSOCKIFY_BIN || 'websockify';
-    children.push(await managedProcess(websockifyBin, ['--verbose', '--web=/usr/share/novnc', '--heartbeat=30', '127.0.0.1:6080', '127.0.0.1:5900']));
-    await new Promise(resolve => setTimeout(resolve, 500));
-    if (children.some(child => child.exitCode !== null)) throw new Error('Não consegui iniciar a tela remota de login na VPS.');
-    loginTunnel = children;
-    process.env.DISPLAY = display;
-  } catch (error) {
-    for (const child of children.reverse()) if (child.exitCode === null) child.kill('SIGTERM');
-    throw error;
+loginServer.on('upgrade', (req, socket, head) => {
+  const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+  const publicOrigin = new URL(loginBaseUrl).origin;
+  if (requestUrl.pathname !== `${loginPath}/ws` || req.headers.origin !== publicOrigin) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
   }
-}
-function stopLoginChrome() {
-  const profileArg = `--user-data-dir=${path.join(tecDir, 'chrome-profile')}`;
-  try {
-    for (const pid of fs.readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
-      try {
-        const commandLine = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ');
-        if (commandLine.includes(profileArg)) process.kill(Number(pid), 'SIGTERM');
-      } catch { /* processo terminou ou não pertence ao usuário do serviço */ }
+  loginSockets.handleUpgrade(req, socket, head, ws => loginSockets.emit('connection', ws));
+});
+loginSockets.on('connection', ws => {
+  const authTimeout = setTimeout(() => ws.close(4401, 'Autenticação expirou'), 5_000);
+  let authenticated = false;
+  ws.on('message', raw => {
+    let message;
+    try { message = JSON.parse(raw.toString()); } catch { ws.close(4400, 'Mensagem inválida'); return; }
+    if (!authenticated) {
+      const attempt = loginAttempts.get(String(message.token || ''));
+      if (message.type !== 'auth' || !attempt || attempt !== activeLogin || attempt.status !== 'waiting' || Date.now() > attempt.expiresAt) {
+        clearTimeout(authTimeout);
+        ws.close(4401, 'Link de login inválido ou expirado');
+        return;
+      }
+      authenticated = true;
+      clearTimeout(authTimeout);
+      attempt.status = 'connecting';
+      attempt.ws = ws;
+      void runBrowserLogin(attempt, ws);
+      return;
     }
-  } catch { /* somente disponível no Linux da VPS */ }
-}
+    const attempt = activeLogin;
+    if (typeof attempt?.input === 'function') void attempt.input(message).catch(() => {});
+  });
+  ws.on('close', () => {
+    clearTimeout(authTimeout);
+    const attempt = activeLogin;
+    if (authenticated && attempt?.ws === ws && attempt.status === 'connecting') {
+      attempt.status = 'cancelled';
+      attempt.browser?.close().catch(() => {});
+    }
+  });
+});
 async function beginLogin(chatId, userId) {
   if (!loginBaseUrl) throw new Error('Falta configurar BOT_LOGIN_BASE_URL com o endereço HTTPS /tec-login da VPS.');
   const publicUrl = new URL(loginBaseUrl);
@@ -141,43 +196,29 @@ async function beginLogin(chatId, userId) {
   if (activeLogin) throw new Error('Já existe um login em andamento. Abra o link recebido ou aguarde ele expirar.');
   const attempt = {
     token: randomBytes(32).toString('base64url'),
-    vncPassword: randomBytes(8).toString('base64url').slice(0, 8),
-    chatId, userId, status: 'waiting', expiresAt: Date.now() + 10 * 60_000,
+    chatId, userId, status: 'waiting', expiresAt: Date.now() + 10 * 60_000, browser: null, ws: null,
   };
   loginAttempts.set(attempt.token, attempt);
   activeLogin = attempt;
+  attempt.expiryTimer = setTimeout(() => {
+    if (activeLogin !== attempt || attempt.status !== 'waiting') return;
+    attempt.status = 'expired';
+    activeLogin = null;
+    loginAttempts.delete(attempt.token);
+    void tg('sendMessage', { chat_id: chatId, text: 'O link de login TEC expirou. Envie /login novamente para gerar outro.' }).catch(() => {});
+  }, attempt.expiresAt - Date.now()).unref();
   try {
-    await startLoginTunnel(attempt.vncPassword);
-    attempt.runner = loginBrowser(client, { timeoutMs: 10 * 60_000, log: () => {} })
-      .then(async () => {
-        attempt.status = 'success';
-        await tg('sendMessage', { chat_id: chatId, text: 'Sessão TEC atualizada com sucesso. O bot já pode buscar questões e cadernos.' });
-      })
-      .catch(async error => {
-        attempt.status = 'failed';
-        console.error(`Login TEC falhou: ${error.message}`);
-        await tg('sendMessage', { chat_id: chatId, text: `Não consegui concluir o login TEC: ${error.message}` }).catch(() => {});
-      })
-      .finally(async () => {
-        stopLoginChrome();
-        await stopLoginTunnel();
-        fs.rmSync(path.join(tecDir, 'chrome-profile'), { recursive: true, force: true });
-        activeLogin = null;
-        setTimeout(() => loginAttempts.delete(attempt.token), 60_000).unref();
-      });
     const link = new URL(loginPath, publicUrl.origin);
-    link.searchParams.set('token', attempt.token);
+    link.hash = attempt.token;
     await tg('sendMessage', {
       chat_id: chatId,
-      text: 'Abra o link no celular e entre no TEC na janela remota. O bot detectará o login e atualizará a sessão automaticamente. O link expira em 10 minutos.',
+      text: 'Abra o link no celular. A página mostrará o TEC e transmitirá a sessão diretamente ao bot após a confirmação. O link expira em 10 minutos e só pode ser usado uma vez.',
       reply_markup: { inline_keyboard: [[{ text: '🔐 Abrir login do TEC', url: link.href }]] },
     });
   } catch (error) {
     loginAttempts.delete(attempt.token);
     activeLogin = null;
-    stopLoginChrome();
-    await stopLoginTunnel();
-    fs.rmSync(path.join(tecDir, 'chrome-profile'), { recursive: true, force: true });
+    clearTimeout(attempt.expiryTimer);
     throw error;
   }
 }

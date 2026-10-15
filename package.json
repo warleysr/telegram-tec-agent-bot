@@ -3,6 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node bot.mjs" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bot.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1",
+    "ws": "8.22.0"
+  }
 }
