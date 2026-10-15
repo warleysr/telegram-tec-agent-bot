@@ -124,15 +124,19 @@ async function importLogin(cookieText) {
   try {
     const trialClient = new TecClient({ session: trial });
     importCookies(trialClient, cookieText);
+    if (!trial.cookies?.TecPermanecerLogado && !trial.cookies?.JSESSIONID) {
+      throw new Error('Cookie TecPermanecerLogado ou JSESSIONID ausente na sincronização.');
+    }
     try {
-      await tecFolders(trialClient);
+      const pastas = await tecFolders(trialClient);
+      log('SYNC', `Validação no TEC bem-sucedida (${pastas.length} pastas encontradas).`);
     } catch (error) {
       if (error instanceof AuthError || [401, 403].includes(error.status)) {
         throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
       }
-      throw error;
+      logWarn('SYNC', `Aviso ao validar pastas no TEC durante sync (cookies serão salvos mesmo assim): ${error.message}`);
     }
-    session.cookies = trial.cookies;
+    session.cookies = { ...session.cookies, ...trial.cookies };
     session.meta = { via: 'chrome-extension-sync', at: new Date().toISOString() };
     session.save();
   } finally {
