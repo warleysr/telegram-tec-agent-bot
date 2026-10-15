@@ -50,7 +50,11 @@ export function logError(tag, message, ...extra) {
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent');
 process.env.TEC_AGENT_HOME ||= tecDir;
-const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
+
+let agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
+if (!fs.existsSync(path.join(agentRoot, 'src/client.mjs')) && fs.existsSync('/opt/tec-agent/src/client.mjs')) {
+  agentRoot = '/opt/tec-agent';
+}
 
 let TecClient, Session, AuthError, TecApi, importCookies;
 let session, client, api;
@@ -77,6 +81,9 @@ try {
 const base = token ? `https://api.telegram.org/bot${token}` : null;
 const stateFile = path.resolve(process.env.BOT_DATA_DIR || '.', 'bot-state.json');
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { chats: {}, polls: {} };
+if (state.unavailable) {
+  delete state.unavailable;
+}
 const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
 let offset = 0;
 
@@ -691,6 +698,7 @@ export async function start() {
     loginServer.listen(loginPort, '127.0.0.1', resolve);
   });
 
+  save();
   log('STARTUP', `Bot Telegram TEC iniciado com sucesso.`);
   log('STARTUP', `Node.js: ${process.version} | PID: ${process.pid} | Plataforma: ${process.platform}`);
   log('STARTUP', `Servidor HTTP de sincronização escutando em 127.0.0.1:${loginPort}`);
@@ -714,8 +722,7 @@ export async function start() {
   }
 }
 
-const isMain = Boolean(process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href);
-if (isMain) {
+if (!process.env.BOT_SKIP_START) {
   start().catch((err) => {
     logError('FATAL', `Falha crítica ao executar o bot: ${err.message}`);
     process.exit(1);

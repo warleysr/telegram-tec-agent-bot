@@ -28,6 +28,7 @@ module.exports = {
       name: 'telegram-tec-bot',
       script: path.join(__dirname, 'bot.mjs'),
       cwd: __dirname,
+      exec_mode: 'fork',
       instances: 1,
       autorestart: true,
       watch: false,

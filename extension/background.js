@@ -1,12 +1,12 @@
 const API_BASE = 'https://blackgroup.com.br/tec-login';
-const TEC_URL = 'https://www.tecconcursos.com.br/';
-const AUTH_COOKIE_NAMES = new Set(['TecPermanecerLogado', 'JSESSIONID']);
+const TEC_DOMAIN = 'tecconcursos.com.br';
+const AUTH_COOKIE_NAMES = new Set(['TecPermanecerLogado', 'JSESSIONID', 'aws-waf-token']);
 let syncTimer;
 let syncRunning = false;
 let syncAgain = false;
 
 async function currentCookieHeader() {
-  const cookies = await chrome.cookies.getAll({ url: TEC_URL });
+  const cookies = await chrome.cookies.getAll({ domain: TEC_DOMAIN });
   const header = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
   if (!cookies.some(cookie => cookie.name === 'TecPermanecerLogado' || cookie.name === 'JSESSIONID')) {
     throw new Error('Não encontrei cookie de sessão. Entre no TEC nesta instalação do Chrome e tente novamente.');
