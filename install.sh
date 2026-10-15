@@ -31,7 +31,24 @@ if ! command -v apt-get >/dev/null; then
   echo "Instale manualmente Chromium, Xvfb, x11vnc e websockify antes de continuar." >&2
   exit 1
 fi
-apt-get update
+apt_update() {
+  local output status=0 other_errors
+  output="$(apt-get update 2>&1)" || status=$?
+  printf '%s\n' "$output"
+  if [[ $status -eq 0 ]]; then return 0; fi
+
+  # Instalações antigas do cloudflared ainda usam pkg.cloudflare.com/debian,
+  # que retorna 404. Não deixe essa fonte alheia ao bot bloquear seus pacotes.
+  if grep -Fq "https://pkg.cloudflare.com/debian stable Release" <<< "$output"; then
+    other_errors="$(grep -E '^(Err:|E: )' <<< "$output" | grep -vF "https://pkg.cloudflare.com/debian stable Release" || true)"
+    if [[ -z "$other_errors" ]]; then
+      echo "Aviso: a fonte antiga do Cloudflare falhou, mas as demais fontes APT foram atualizadas." >&2
+      return 0
+    fi
+  fi
+  return "$status"
+}
+apt_update
 apt-get install -y xvfb x11vnc novnc python3-websockify
 if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
   if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
@@ -40,7 +57,7 @@ if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
     curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
     chmod 0644 /etc/apt/keyrings/google-chrome.gpg
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-    apt-get update
+    apt_update
     apt-get install -y google-chrome-stable
   fi
 else
