@@ -34,6 +34,8 @@ async function tg(method, payload = {}) {
 }
 const chatKey = (id) => String(id);
 function privateChat(chat) { return chat.type === 'private'; }
+function compact(text = '') { return String(text).replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]*\n+/g, '\n').replace(/\n{2,}/g, '\n').trim(); }
+function escapeHtml(text = '') { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function cadernoId(input) {
   let u;
   try { u = new URL(input); } catch { throw new Error('Envie o link completo do caderno do TEC.'); }
@@ -170,9 +172,19 @@ async function showQuestion(chat, user, mode = 'next') {
   const correct = q.gabarito;
   const correctId = options.findIndex((x, i) => x === correct || (String(correct).toUpperCase() === String.fromCharCode(65 + i)));
   if (correctId < 0) throw new Error(`Não foi possível identificar o gabarito da questão ${q.id}; quiz não enviado para evitar correção incorreta.`);
-  const prompt = `${q.enunciado || '(sem enunciado)'}${q.materia?.nome ? `\n\n${q.materia.nome}` : ''}${q.banca ? ` • ${q.banca}` : ''}${q.ano ? ` • ${q.ano}` : ''}`;
-  await tg('sendMessage', { chat_id: chat.id, text: prompt });
-  const poll = await tg('sendPoll', { chat_id: chat.id, question: `Questão TEC #${q.id} — ${n}/${cs.total}`, options: options.map((x, i) => ({ text: `${String.fromCharCode(65 + i)}. ${x}`.slice(0, 100) })), type: 'quiz', is_anonymous: false, correct_option_id: correctId, explanation: 'Use o botão abaixo para ver o comentário do professor.', explanation_parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'Ver comentário', callback_data: `c:${q.id}` }]] } });
+  const description = [
+    q.banca,
+    [q.orgao || q.orgaoNome, q.ano].filter(Boolean).join(' '),
+    q.cargo,
+    q.prova,
+    q.numero ? `Questão ${q.numero}` : null,
+  ].filter(Boolean).join(' - ') || `Questão TEC #${q.id}`;
+  const prompt = compact(`${q.enunciado || '(sem enunciado)'}${q.materia?.nome ? `\n${q.materia.nome}` : ''}`);
+  const parts = prompt.match(/[\s\S]{1,3800}/g) || [''];
+  for (let i = 0; i < parts.length; i++) {
+    await tg('sendMessage', { chat_id: chat.id, text: `${i === 0 ? `<b>${escapeHtml(description)}</b>\n` : ''}${escapeHtml(parts[i])}`, parse_mode: 'HTML' });
+  }
+  const poll = await tg('sendPoll', { chat_id: chat.id, question: `Questão TEC #${q.id} — ${n}/${cs.total}`, options: options.map((x, i) => ({ text: `${String.fromCharCode(65 + i)}. ${x}`.slice(0, 100) })), type: 'quiz', is_anonymous: false, correct_option_id: correctId, explanation: 'Use os botões abaixo para ver o comentário ou escolher outra questão.', explanation_parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'Ver comentário', callback_data: `c:${q.id}` }], [{ text: 'Próxima', callback_data: 'q:n' }, { text: 'Aleatória', callback_data: 'q:r' }]] } });
   state.polls[poll.poll.id] = { chatId: chat.id, cid: cs.cadernoId, index: n, qid: q.id, answer: correctId };
   save();
 }
@@ -189,7 +201,7 @@ async function handleMessage(m) {
         return tg('sendMessage', { chat_id: chat.id, text: 'Sessão TEC atualizada e validada. Os próximos pedidos usarão os cookies novos.' });
       } catch (e) { return tg('sendMessage', { chat_id: chat.id, text: `Não consegui atualizar a sessão: ${e.message}` }); }
     }
-    if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /caderno lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
+    if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
     if (cmd === '/id' || cmd.startsWith('/id@')) return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
     if (cmd === '/login' || cmd.startsWith('/login@')) {
       if (!admins.has(String(user.id))) throw new Error('Este comando é restrito aos administradores configurados na VPS.');
@@ -198,13 +210,13 @@ async function handleMessage(m) {
       return tg('sendMessage', { chat_id: chat.id, text: 'Envie agora, nesta conversa privada, o valor do header Cookie da sessão TEC (sem escrever “Cookie:”). O bot tenta apagar a mensagem recebida; se ela continuar visível, apague-a manualmente.' });
     }
     if (cmd === '/caderno' || cmd.startsWith('/caderno@')) {
-      if (args[0]?.toLowerCase() === 'lista') return browse(chat.id, null);
       const id = cadernoId(args.join(' '));
       const total = await findTotal(id);
       if (!total) throw new Error('Não localizei a quantidade de questões. Confira se o caderno pertence à conta autenticada do tec-agent e se o link contém o ID numérico.');
       Object.assign(chatState(chat.id), { cadernoId: id, total, link: args.join(' ') }); save();
       return tg('sendMessage', { chat_id: chat.id, text: `Caderno carregado (${total} questões). Use /proxima ou /aleatoria.` });
     }
+    if (cmd === '/lista' || cmd.startsWith('/lista@')) return browse(chat.id, null);
     if (cmd === '/proxima' || cmd.startsWith('/proxima@')) return showQuestion(chat, user, 'next');
     if (cmd === '/aleatoria' || cmd.startsWith('/aleatoria@')) return showQuestion(chat, user, 'random');
     if (cmd === '/status' || cmd.startsWith('/status@')) {
@@ -240,7 +252,7 @@ async function handleUpdate(u) {
           const folders = await api.pastas();
           if (!folders.some(folder => String(folder.id) === String(a))) throw new Error('Pasta não encontrada.');
           const subfolderId = c && b !== '0' ? b : null;
-          const caderno = subfolderId ? c : b;
+          const caderno = c || b;
           const item = (await listAll(a, subfolderId)).find(entry => String(entry.id) === String(caderno) && !entry.subpasta);
           if (!item) throw new Error('Não encontrei esse caderno na sua conta TEC.');
           const total = totalFrom(item);
@@ -258,6 +270,10 @@ async function handleUpdate(u) {
         for (const chunk of chunks) await tg('sendMessage', { chat_id: cb.message.chat.id, text: chunk, reply_to_message_id: cb.message.message_id });
         await tg('answerCallbackQuery', { callback_query_id: cb.id });
       } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: e.message.slice(0, 180), show_alert: true }); }
+    } else if (cb.data === 'q:n' || cb.data === 'q:r') {
+      await tg('answerCallbackQuery', { callback_query_id: cb.id });
+      try { await showQuestion(cb.message.chat, cb.from, cb.data === 'q:n' ? 'next' : 'random'); }
+      catch (e) { await tg('sendMessage', { chat_id: cb.message.chat.id, text: `Erro: ${e.message}` }); }
     }
   }
 }

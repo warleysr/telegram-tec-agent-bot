@@ -33,11 +33,11 @@ O instalador não instala Node.js nem Git. Instale Node.js 20 ou superior e Git 
 - `/proxima` abre a primeira questão ainda não respondida por você no chat.
 - `/aleatoria` escolhe entre suas questões não respondidas.
 - `/status` mostra seu progresso.
-- `/caderno lista` abre a navegação por pastas, subpastas e cadernos, com botões de seleção.
+- `/lista` abre a navegação por pastas, subpastas e cadernos, com botões de seleção.
 - `/login` permite ao administrador atualizar os cookies TEC depois de fazer login novamente no navegador. Inicie o comando em conversa privada e envie o valor do header `Cookie` (sem `Cookie:`) na mensagem seguinte. O bot tenta apagar essa mensagem depois de recebê-la; se ela continuar visível, apague-a manualmente.
 - `/id` mostra seu ID Telegram para configurar permissões administrativas.
 
-Cada questão chega como quiz do Telegram, que indica acerto ou erro e oferece o botão **Ver comentário**. Em grupos, o progresso é separado por usuário e chat. Respostas no Telegram não são sincronizadas com o TEC.
+Cada questão chega como quiz do Telegram, que indica acerto ou erro e oferece o botão **Ver comentário**. A descrição da prova aparece em negrito antes do enunciado; os botões **Próxima** e **Aleatória** ficam logo abaixo do quiz. Em grupos, o progresso é separado por usuário e chat. Respostas no Telegram não são sincronizadas com o TEC.
 
 Exemplo:
 
@@ -46,7 +46,7 @@ Exemplo:
 /proxima
 /aleatoria
 /status
-/caderno lista
+/lista
 ```
 
 O login do TEC aceita uma sessão ativa por vez. Se autenticar no navegador e isso invalidar a sessão usada pelo bot, envie `/login` ao bot no privado e cole os cookies atuais. O bot valida a nova sessão antes de substituir a salva.
