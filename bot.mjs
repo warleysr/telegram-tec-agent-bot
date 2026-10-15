@@ -151,11 +151,14 @@ async function loadQuestion(cid, n) {
   // resposta pelo comentário do professor; essa inferência pode confundir uma
   // conclusão sobre o texto-base com o gabarito do item.
   q.gabarito = null;
-  const numero = typeof raw?.numeroAlternativaCorreta === 'number'
-    ? raw.numeroAlternativaCorreta
-    : /^\d+$/.test(String(raw?.numeroAlternativaCorreta ?? ''))
-      ? Number(raw.numeroAlternativaCorreta)
-      : NaN;
+  // O TEC pode incluir o gabarito estruturado na resposta do caderno ou na
+  // resposta da questão. Não use api.questao().gabarito: ele também pode vir
+  // de inferência sobre o comentário do professor.
+  const numeroRaw = raw?.numeroAlternativaCorreta ?? item.numeroAlternativaCorreta;
+  const numero = typeof numeroRaw === 'number'
+    ? numeroRaw
+    : /^\d+$/.test(String(numeroRaw ?? '')) ? Number(numeroRaw) : NaN;
+  const letraRaw = String(raw?.alternativaCorreta ?? item.alternativaCorreta ?? '').trim().toUpperCase();
   // Em algumas questões C/E a API omite o array de alternativas; o Telegram
   // já usa exatamente estas duas opções como fallback em showQuestion().
   const opcoes = q.alternativas?.length
@@ -165,6 +168,12 @@ async function loadQuestion(cid, n) {
     q.gabarito = q.tipo === 'CERTO_ERRADO'
       ? opcoes[numero - 1]
       : String.fromCharCode(64 + numero);
+  } else if (/^[A-J]$/.test(letraRaw) && letraRaw.charCodeAt(0) - 65 < opcoes.length) {
+    q.gabarito = q.tipo === 'CERTO_ERRADO'
+      ? opcoes[letraRaw.charCodeAt(0) - 65]
+      : letraRaw;
+  } else if (q.tipo === 'CERTO_ERRADO' && /^(CERTO|ERRADO)$/.test(letraRaw)) {
+    q.gabarito = letraRaw[0] + letraRaw.slice(1).toLowerCase();
   }
   return q;
 }
@@ -253,12 +262,10 @@ async function showFolders(chatId, messageId, page = 0) {
 function chatState(chatId) { return state.chats[chatKey(chatId)] ||= {}; }
 function scoreKey(chatId, userId, cid) { return `${chatId}:${userId}:${cid}`; }
 function solvedSet(chatId, userId, cid) { return new Set(state.answers?.[scoreKey(chatId, userId, cid)] || []); }
-function unavailableSet(cid) { return new Set(state.unavailable?.[String(cid)] || []); }
-async function nextIndex(cs, chatId, userId, mode) {
+async function nextIndex(cs, chatId, userId, mode, skipped = new Set()) {
   const n = cs.total;
   const done = solvedSet(chatId, userId, cs.cadernoId);
-  const unavailable = unavailableSet(cs.cadernoId);
-  const available = Array.from({ length: n }, (_, i) => i + 1).filter(i => !done.has(i) && !unavailable.has(i));
+  const available = Array.from({ length: n }, (_, i) => i + 1).filter(i => !done.has(i) && !skipped.has(i));
   if (mode === 'random') {
     return available.length ? available[Math.floor(Math.random() * available.length)] : null;
   }
@@ -267,28 +274,27 @@ async function nextIndex(cs, chatId, userId, mode) {
 async function showQuestion(chat, user, mode = 'next') {
   const cs = chatState(chat.id);
   if (!cs.cadernoId || !cs.total) throw new Error('Primeiro envie /caderno seguido do link direto do caderno.');
-  let ignoradasNestaBusca = 0;
+  // A lista antiga state.unavailable era persistente e global ao caderno. Se
+  // a extração do gabarito falhasse uma vez, as questões ficavam ignoradas
+  // para sempre, inclusive depois de uma correção. Agora o pulo vale só nesta
+  // busca e as questões serão reavaliadas no próximo /proxima ou /aleatoria.
+  const ignoradasNestaBusca = new Set();
   let n, q, options, correctId;
-  while ((n = await nextIndex(cs, chat.id, user.id, mode)) !== null) {
+  while ((n = await nextIndex(cs, chat.id, user.id, mode, ignoradasNestaBusca)) !== null) {
     q = await loadQuestion(cs.cadernoId, n);
     if (!q) throw new Error(`Não consegui carregar a questão ${n} do caderno. Confira o link e seu login do TEC.`);
     options = q.alternativas?.length ? q.alternativas : ['Certo', 'Errado'];
     correctId = options.findIndex((x, i) => x === q.gabarito || String(q.gabarito).toUpperCase() === String.fromCharCode(65 + i));
     if (correctId >= 0) break;
 
-    state.unavailable ||= {};
-    state.unavailable[String(cs.cadernoId)] ||= [];
-    if (!state.unavailable[String(cs.cadernoId)].includes(n)) state.unavailable[String(cs.cadernoId)].push(n);
-    ignoradasNestaBusca++;
-    save();
+    ignoradasNestaBusca.add(n);
   }
   if (n === null) {
-    const ignoradas = unavailableSet(cs.cadernoId).size;
     const respondidas = solvedSet(chat.id, user.id, cs.cadernoId).size;
-    const resumo = ignoradas ? ` ${ignoradas} questão(ões) sem gabarito retornado pelo TEC foram ignoradas.` : '';
-    return tg('sendMessage', { chat_id: chat.id, text: `Não há mais questões disponíveis neste caderno. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}` });
+    const resumo = ignoradasNestaBusca.size ? ` ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; elas serão verificadas novamente na próxima.` : '';
+    return tg('sendMessage', { chat_id: chat.id, text: `Não há questões com gabarito disponíveis agora. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}` });
   }
-  if (ignoradasNestaBusca) await tg('sendMessage', { chat_id: chat.id, text: `⏭️ ${ignoradasNestaBusca} questão(ões) sem gabarito retornado pelo TEC foram ignoradas.` });
+  if (ignoradasNestaBusca.size) await tg('sendMessage', { chat_id: chat.id, text: `⏭️ ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; serão reavaliadas depois.` });
   const description = [
     q.banca,
     [q.orgao || q.orgaoNome, q.ano].filter(Boolean).join(' '),
@@ -339,9 +345,7 @@ async function handleMessage(m) {
     if (cmd === '/aleatoria' || cmd.startsWith('/aleatoria@')) return showQuestion(chat, user, 'random');
     if (cmd === '/status' || cmd.startsWith('/status@')) {
       const cs = chatState(chat.id); const done = cs.cadernoId ? solvedSet(chat.id, user.id, cs.cadernoId).size : 0;
-      const skipped = cs.cadernoId ? unavailableSet(cs.cadernoId).size : 0;
-      const skippedText = skipped ? ` ${skipped} sem gabarito retornado pelo TEC foram ignoradas.` : '';
-      return tg('sendMessage', { chat_id: chat.id, text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.${skippedText}` : 'Nenhum caderno carregado neste chat.' });
+      return tg('sendMessage', { chat_id: chat.id, text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.` : 'Nenhum caderno carregado neste chat.' });
     }
   } catch (e) {
     await tg('sendMessage', { chat_id: chat.id, text: errorText(e) });
