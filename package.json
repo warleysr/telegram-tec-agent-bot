@@ -1,0 +1,8 @@
+{
+  "name": "telegram-tec-agent-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node bot.mjs" }
+}
