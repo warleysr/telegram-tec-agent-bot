@@ -93,7 +93,7 @@ const loginServer = createServer((req, res) => {
 });
 function managedProcess(command, args, env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'ignore', env: { ...process.env, ...env } });
+    const child = spawn(command, args, { stdio: command === 'websockify' || command === 'x11vnc' ? 'inherit' : 'ignore', env: { ...process.env, ...env } });
     child.once('spawn', () => resolve(child));
     child.once('error', reject);
   });
@@ -110,8 +110,8 @@ async function startLoginTunnel(password) {
   try {
     children.push(await managedProcess('Xvfb', [display, '-screen', '0', '1440x1000x24', '-nolisten', 'tcp', '-ac']));
     await new Promise(resolve => setTimeout(resolve, 500));
-    children.push(await managedProcess('x11vnc', ['-display', display, '-forever', '-shared', '-rfbport', '5900', '-localhost', '-passwd', password, '-noxdamage']));
-    children.push(await managedProcess('websockify', ['--web=/usr/share/novnc', '--heartbeat=30', '127.0.0.1:6080', '127.0.0.1:5900']));
+    children.push(await managedProcess('x11vnc', ['-display', display, '-forever', '-shared', '-rfbport', '5900', '-localhost', '-passwd', password, '-noxdamage', '-verbose']));
+    children.push(await managedProcess('websockify', ['--verbose', '--web=/usr/share/novnc', '--heartbeat=30', '127.0.0.1:6080', '127.0.0.1:5900']));
     await new Promise(resolve => setTimeout(resolve, 500));
     if (children.some(child => child.exitCode !== null)) throw new Error('Não consegui iniciar a tela remota de login na VPS.');
     loginTunnel = children;
