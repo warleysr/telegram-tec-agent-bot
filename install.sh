@@ -113,28 +113,51 @@ EOF
     systemctl reload nginx
     certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email --redirect -d "$PUBLIC_HOST"
   elif systemctl is-active --quiet apache2; then
-    apt-get install -y certbot python3-certbot-apache
     a2enmod proxy proxy_http proxy_wstunnel headers >/dev/null
-    local site=/etc/apache2/sites-available/telegram-tec-bot.conf
-    if [[ -e "$site" ]] && ! grep -q '# telegram-tec-bot managed' "$site"; then
-      echo "Já existe $site sem marca de gerenciamento; não vou sobrescrevê-lo." >&2
-      exit 1
-    fi
-    cat > "$site" <<EOF
-# telegram-tec-bot managed
-<VirtualHost *:80>
-    ServerName ${PUBLIC_HOST}
+    python3 - "$PUBLIC_HOST" <<'PY'
+import glob
+import os
+import re
+import sys
+
+host = sys.argv[1].lower()
+marker = "# telegram-tec-bot managed"
+block = f'''    {marker}
     ProxyPreserveHost On
     ProxyPass /tec-login http://127.0.0.1:8088/tec-login
     ProxyPassReverse /tec-login http://127.0.0.1:8088/tec-login
     ProxyPass /tec-vnc/ ws://127.0.0.1:6080/
     ProxyPassReverse /tec-vnc/ ws://127.0.0.1:6080/
-</VirtualHost>
-EOF
-    a2ensite telegram-tec-bot.conf >/dev/null
+'''
+for path in glob.glob('/etc/apache2/sites-enabled/*'):
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+    except (OSError, UnicodeError):
+        continue
+    changed = False
+    def update(match):
+        global changed
+        opening, body, closing = match.group(1), match.group(2), match.group(3)
+        if not re.search(r':443\s*>\s*$', opening, re.I):
+            return match.group(0)
+        names = re.findall(r'^\s*Server(?:Name|Alias)\s+(.+?)\s*$', body, re.I | re.M)
+        if not any(host in line.split() for line in names):
+            return match.group(0)
+        body = re.sub(r'(?ms)^\s*' + re.escape(marker) + r'.*?(?=^\s*</VirtualHost>)', '', body)
+        changed = True
+        return opening + body.rstrip() + '\n' + block + closing
+    updated = re.sub(r'(?is)(<VirtualHost\b[^>]*>)(.*?)(</VirtualHost\s*>)', update, text)
+    if changed:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(updated)
+        print(f'Proxy do bot adicionado ao virtual host HTTPS existente: {path}')
+        break
+if not changed:
+    sys.exit(f'Não encontrei um VirtualHost *:443 ativo com ServerName/ServerAlias {host}. O certificado existente foi preservado; verifique o domínio configurado no Apache.')
+PY
     apache2ctl configtest
     systemctl reload apache2
-    certbot --apache --non-interactive --agree-tos --register-unsafely-without-email --redirect -d "$PUBLIC_HOST"
   else
     if ! command -v caddy >/dev/null; then
       apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
