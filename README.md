@@ -12,10 +12,11 @@ cd telegram-tec-agent-bot
 sudo bash install.sh
 ```
 
-O script pedirá, sem exibir na tela:
+O script pedirá:
 
-1. O token criado no `@BotFather`.
-2. O header `Cookie` de uma sessão logada no TEC (copie-o do navegador). A sessão é validada antes de iniciar o serviço.
+1. O token criado no `@BotFather` (entrada oculta).
+2. Seu ID Telegram administrativo (consulte `@userinfobot`; também há o comando `/id` depois da instalação).
+3. O valor do header `Cookie` de uma sessão logada no TEC, sem o prefixo `Cookie:` (entrada oculta). A sessão é validada antes de iniciar o serviço.
 
 Depois, acompanhe o serviço com:
 
@@ -32,6 +33,9 @@ O instalador não instala Node.js nem Git. Instale Node.js 20 ou superior e Git 
 - `/proxima` abre a primeira questão ainda não respondida por você no chat.
 - `/aleatoria` escolhe entre suas questões não respondidas.
 - `/status` mostra seu progresso.
+- `/caderno lista` abre a navegação por pastas, subpastas e cadernos, com botões de seleção.
+- `/login` permite ao administrador atualizar os cookies TEC depois de fazer login novamente no navegador. Inicie o comando em conversa privada e envie o valor do header `Cookie` (sem `Cookie:`) na mensagem seguinte. O bot tenta apagar essa mensagem depois de recebê-la; se ela continuar visível, apague-a manualmente.
+- `/id` mostra seu ID Telegram para configurar permissões administrativas.
 
 Cada questão chega como quiz do Telegram, que indica acerto ou erro e oferece o botão **Ver comentário**. Em grupos, o progresso é separado por usuário e chat. Respostas no Telegram não são sincronizadas com o TEC.
 
@@ -42,7 +46,10 @@ Exemplo:
 /proxima
 /aleatoria
 /status
+/caderno lista
 ```
+
+O login do TEC aceita uma sessão ativa por vez. Se autenticar no navegador e isso invalidar a sessão usada pelo bot, envie `/login` ao bot no privado e cole os cookies atuais. O bot valida a nova sessão antes de substituir a salva.
 
 O bot usa long polling, sem necessidade de abrir uma porta ou configurar webhook. Os comandos funcionam em grupos com o modo privacy padrão do Telegram.
 
@@ -56,6 +63,8 @@ git pull
 sudo install -m 0644 bot.mjs /opt/telegram-tec-bot/bot.mjs
 sudo systemctl restart telegram-tec-bot
 ```
+
+Para uma instalação anterior, autorize o `/login` definindo `BOT_ADMIN_IDS` em `/etc/telegram-tec-bot.env` (um ou mais IDs numéricos separados por vírgula) e reinicie o serviço.
 
 ## Dados e credenciais
 

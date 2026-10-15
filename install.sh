@@ -31,7 +31,9 @@ NODE_BIN="$(command -v node)"
 read -r -s -p "Token do bot (BotFather): " TELEGRAM_BOT_TOKEN
 printf '\n'
 if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then echo "Token vazio." >&2; exit 1; fi
-read -r -s -p "Cookies do TEC (header Cookie do navegador logado): " TEC_COOKIES
+read -r -p "ID Telegram do administrador (consulte @userinfobot): " BOT_ADMIN_IDS
+if [[ ! "$BOT_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then echo "Informe um ou mais IDs numéricos separados por vírgula." >&2; exit 1; fi
+read -r -s -p "Cookies do TEC (valor do header, sem escrever 'Cookie:'): " TEC_COOKIES
 printf '\n'
 if [[ -z "$TEC_COOKIES" ]]; then echo "Cookies vazios." >&2; exit 1; fi
 
@@ -60,11 +62,13 @@ node --input-type=module -e '
   if (!who.logged) { console.error("Sessão TEC não autenticada. Confira os cookies exportados."); process.exit(1); }
   console.log("Sessão TEC validada.");
 '
+chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/tec/session.json"
+chmod 0600 "$DATA_DIR/tec/session.json"
 unset TEC_COOKIES
 
 umask 077
-printf 'TELEGRAM_BOT_TOKEN=%s\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
-  "$TELEGRAM_BOT_TOKEN" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
+printf 'TELEGRAM_BOT_TOKEN=%s\nBOT_ADMIN_IDS=%s\nTEC_AGENT_ROOT=%s\nTEC_AGENT_DIR=%s\nBOT_DATA_DIR=%s\n' \
+  "$TELEGRAM_BOT_TOKEN" "$BOT_ADMIN_IDS" "$TEC_DIR" "$DATA_DIR/tec" "$DATA_DIR" > "$ENV_FILE"
 unset TELEGRAM_BOT_TOKEN
 chown root:root "$ENV_FILE"
 chmod 0600 "$ENV_FILE"

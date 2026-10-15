@@ -9,10 +9,15 @@ const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent'
 const agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
 const { TecClient, Session } = await import(pathToFileURL(path.join(agentRoot, 'src/client.mjs')));
 const { TecApi } = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
-const api = new TecApi(new TecClient({ session: Session.load(path.join(tecDir, 'session.json')) }));
+const { importCookies } = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
+const session = Session.load(path.join(tecDir, 'session.json'));
+const client = new TecClient({ session });
+const api = new TecApi(client);
 const base = `https://api.telegram.org/bot${token}`;
 const stateFile = path.resolve(process.env.BOT_DATA_DIR || '.', 'bot-state.json');
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { chats: {}, polls: {} };
+const admins = new Set((process.env.BOT_ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
+const loginPending = new Set();
 let offset = 0;
 
 function save() {
@@ -28,9 +33,7 @@ async function tg(method, payload = {}) {
   return data.result;
 }
 const chatKey = (id) => String(id);
-const userKey = (id) => String(id);
-const esc = (s = '') => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-function clean(s = '') { return String(s).replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\n{3,}/g, '\n\n').trim(); }
+function privateChat(chat) { return chat.type === 'private'; }
 function cadernoId(input) {
   let u;
   try { u = new URL(input); } catch { throw new Error('Envie o link completo do caderno do TEC.'); }
@@ -60,6 +63,87 @@ async function findTotal(cid) {
     }
   }
   return 0;
+}
+async function listAll(folderId, subfolderId) {
+  const all = [], seen = new Set();
+  for (let page = 1; ; page++) {
+    const items = await api.listarCadernos(folderId, { subpastaId: subfolderId, pagina: page });
+    if (!items.length || items.every(item => seen.has(String(item.id)))) return all;
+    for (const item of items) seen.add(String(item.id));
+    all.push(...items);
+  }
+}
+function button(text, callback_data) { return { text: String(text).slice(0, 60), callback_data }; }
+async function browse(chatId, messageId, where = { type: 'root', page: 0 }) {
+  const folders = await api.pastas();
+  if (!folders.length) throw new Error('Não encontrei pastas na sua conta TEC.');
+  let folder, subfolderId = null, title, back = 'b:root';
+  if (where.type === 'root') {
+    folder = folders.find(x => x.ativa) || folders.find(x => /sem classifica/i.test(x.nome)) || folders[0];
+    title = `Cadernos na raiz · ${folder.nome}`;
+  } else {
+    folder = folders.find(x => String(x.id) === String(where.folderId));
+    if (!folder) throw new Error('Pasta não encontrada. Abra /caderno lista novamente.');
+    if (where.type === 'sub') {
+      subfolderId = String(where.subfolderId);
+      back = `b:f:${folder.id}:0`;
+      title = `${folder.nome} · subpasta`;
+    } else {
+      back = 'b:root';
+      title = folder.nome;
+    }
+  }
+  const items = await listAll(folder.id, subfolderId);
+  const pageSize = 8, pages = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.min(Math.max(0, Number(where.page) || 0), pages - 1);
+  const keyboard = [];
+  if (where.type === 'root') {
+    keyboard.push([{ text: 'Pastas', callback_data: 'b:folders:0' }]);
+  }
+  for (const item of items.slice(page * pageSize, (page + 1) * pageSize)) {
+    if (item.subpasta) keyboard.push([button(`📁 ${item.nome}`, `b:s:${folder.id}:${item.id}:0`)]);
+    else keyboard.push([button(`📘 ${item.nome} · ${item.quantidadeItens ?? '?'} questões`, `b:c:${folder.id}:${subfolderId || 0}:${item.id}`)]);
+  }
+  if (pages > 1) {
+    const prefix = where.type === 'sub' ? `b:s:${folder.id}:${subfolderId}` : where.type === 'folder' ? `b:f:${folder.id}` : 'b:r';
+    keyboard.push([
+      ...(page > 0 ? [button('‹ Anterior', `${prefix}:${page - 1}`)] : []),
+      button(`${page + 1}/${pages}`, 'b:nop'),
+      ...(page + 1 < pages ? [button('Próxima ›', `${prefix}:${page + 1}`)] : []),
+    ]);
+  }
+  keyboard.push([button('‹ Voltar às pastas', where.type === 'root' ? 'b:folders:0' : back)]);
+  const text = `${title}\n${items.length ? `${items.length} itens` : 'Nenhum caderno ou subpasta nesta pasta.'}`;
+  const payload = { chat_id: chatId, message_id: messageId, text, reply_markup: { inline_keyboard: keyboard } };
+  if (messageId) await tg('editMessageText', payload);
+  else await tg('sendMessage', { chat_id: chatId, text, reply_markup: payload.reply_markup });
+}
+async function showFolders(chatId, messageId, page = 0) {
+  const folders = await api.pastas();
+  const pageSize = 12, pages = Math.max(1, Math.ceil(folders.length / pageSize));
+  page = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const keyboard = folders.slice(page * pageSize, (page + 1) * pageSize).map(f => [button(`📂 ${f.nome}`, `b:f:${f.id}:0`)]);
+  if (pages > 1) keyboard.push([
+    ...(page > 0 ? [button('‹ Anterior', `b:folders:${page - 1}`)] : []),
+    button(`${page + 1}/${pages}`, 'b:nop'),
+    ...(page + 1 < pages ? [button('Próxima ›', `b:folders:${page + 1}`)] : []),
+  ]);
+  keyboard.push([button('‹ Voltar', 'b:root')]);
+  const payload = { chat_id: chatId, text: 'Escolha uma pasta:', reply_markup: { inline_keyboard: keyboard } };
+  if (messageId) await tg('editMessageText', { ...payload, message_id: messageId });
+  else await tg('sendMessage', payload);
+}
+async function importLogin(cookieText) {
+  const tempFile = path.join(tecDir, '.session-check.json');
+  const trial = new Session(tempFile);
+  try {
+    importCookies(new TecClient({ session: trial }), cookieText);
+    if (!(await new TecClient({ session: trial }).whoami()).logged) throw new Error('O TEC não aceitou esses cookies. Copie novamente o header Cookie da sessão atual.');
+    session.cookies = trial.cookies;
+    session.meta = { ...trial.meta, at: new Date().toISOString() };
+    session.save();
+    return true;
+  } finally { trial.clear(); }
 }
 function chatState(chatId) { return state.chats[chatKey(chatId)] ||= {}; }
 function scoreKey(chatId, userId, cid) { return `${chatId}:${userId}:${cid}`; }
@@ -97,8 +181,24 @@ async function handleMessage(m) {
   const [cmd, ...args] = m.text.trim().split(/\s+/);
   const chat = m.chat, user = m.from;
   try {
-    if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /caderno LINK para iniciar, /proxima para a próxima não respondida, /aleatoria para uma questão aleatória e /status para ver o progresso. Em grupos, cada pessoa tem seu próprio histórico.' });
+    if (loginPending.has(String(user.id))) {
+      loginPending.delete(String(user.id));
+      await tg('deleteMessage', { chat_id: chat.id, message_id: m.message_id }).catch(() => {});
+      try {
+        await importLogin(m.text);
+        return tg('sendMessage', { chat_id: chat.id, text: 'Sessão TEC atualizada e validada. Os próximos pedidos usarão os cookies novos.' });
+      } catch (e) { return tg('sendMessage', { chat_id: chat.id, text: `Não consegui atualizar a sessão: ${e.message}` }); }
+    }
+    if (cmd === '/start' || cmd.startsWith('/start@')) return tg('sendMessage', { chat_id: chat.id, text: 'Bot de questões TEC. Use /caderno lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. Em grupos, o progresso é individual.' });
+    if (cmd === '/id' || cmd.startsWith('/id@')) return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
+    if (cmd === '/login' || cmd.startsWith('/login@')) {
+      if (!admins.has(String(user.id))) throw new Error('Este comando é restrito aos administradores configurados na VPS.');
+      if (!privateChat(chat)) throw new Error('Por segurança, envie /login em uma conversa privada com o bot.');
+      loginPending.add(String(user.id));
+      return tg('sendMessage', { chat_id: chat.id, text: 'Envie agora, nesta conversa privada, o valor do header Cookie da sessão TEC (sem escrever “Cookie:”). O bot tenta apagar a mensagem recebida; se ela continuar visível, apague-a manualmente.' });
+    }
     if (cmd === '/caderno' || cmd.startsWith('/caderno@')) {
+      if (args[0]?.toLowerCase() === 'lista') return browse(chat.id, null);
       const id = cadernoId(args.join(' '));
       const total = await findTotal(id);
       if (!total) throw new Error('Não localizei a quantidade de questões. Confira se o caderno pertence à conta autenticada do tec-agent e se o link contém o ID numérico.');
@@ -128,7 +228,29 @@ async function handleUpdate(u) {
   }
   if (u.callback_query) {
     const cb = u.callback_query;
-    if (cb.data?.startsWith('c:')) {
+    if (cb.data?.startsWith('b:')) {
+      try {
+        const [_, action, a, b, c] = cb.data.split(':');
+        if (action === 'root') await browse(cb.message.chat.id, cb.message.message_id);
+        else if (action === 'folders') await showFolders(cb.message.chat.id, cb.message.message_id, a);
+        else if (action === 'r') await browse(cb.message.chat.id, cb.message.message_id, { type: 'root', page: a });
+        else if (action === 'f') await browse(cb.message.chat.id, cb.message.message_id, { type: 'folder', folderId: a, page: b });
+        else if (action === 's') await browse(cb.message.chat.id, cb.message.message_id, { type: 'sub', folderId: a, subfolderId: b, page: c });
+        else if (action === 'c') {
+          const folders = await api.pastas();
+          if (!folders.some(folder => String(folder.id) === String(a))) throw new Error('Pasta não encontrada.');
+          const subfolderId = c && b !== '0' ? b : null;
+          const caderno = subfolderId ? c : b;
+          const item = (await listAll(a, subfolderId)).find(entry => String(entry.id) === String(caderno) && !entry.subpasta);
+          if (!item) throw new Error('Não encontrei esse caderno na sua conta TEC.');
+          const total = totalFrom(item);
+          if (!total) throw new Error('O TEC não informou quantas questões há neste caderno.');
+          Object.assign(chatState(cb.message.chat.id), { cadernoId: String(item.id), total, name: item.nome }); save();
+          await tg('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `Caderno selecionado: ${item.nome}\n${total} questões. Use /proxima ou /aleatoria.` });
+        } else if (action === 'nop') { /* apenas indicador da página */ }
+        await tg('answerCallbackQuery', { callback_query_id: cb.id });
+      } catch (e) { await tg('answerCallbackQuery', { callback_query_id: cb.id, text: e.message.slice(0, 180), show_alert: true }); }
+    } else if (cb.data?.startsWith('c:')) {
       try {
         const q = await api.questao(cb.data.slice(2), { comentario: true });
         const body = q.comentario || 'O TEC não disponibilizou comentário para esta questão.';
