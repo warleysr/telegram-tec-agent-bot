@@ -56,7 +56,7 @@ if (!fs.existsSync(path.join(agentRoot, 'src/client.mjs')) && fs.existsSync('/op
   agentRoot = '/opt/tec-agent';
 }
 
-let TecClient, Session, AuthError, TecApi, importCookies;
+let TecClient, Session, AuthError, TecApi, importCookies, htmlToText, extrairGabarito;
 let session, client, api;
 
 try {
@@ -67,12 +67,14 @@ try {
 
   const apiMod = await import(pathToFileURL(path.join(agentRoot, 'src/api.mjs')));
   TecApi = apiMod.TecApi;
+  htmlToText = apiMod.htmlToText;
+  extrairGabarito = apiMod.extrairGabarito;
 
   const authMod = await import(pathToFileURL(path.join(agentRoot, 'src/auth.mjs')));
   importCookies = authMod.importCookies;
 
   session = Session.load(path.join(tecDir, 'session.json'));
-  client = new TecClient({ session });
+  client = new TecClient({ session, minIntervalMs: 800, retries: 1 });
   api = new TecApi(client);
 } catch (err) {
   logWarn('INIT', `Aviso ao carregar módulos do tec-agent: ${err.message}`);
@@ -127,15 +129,8 @@ async function importLogin(cookieText) {
     if (!trial.cookies?.TecPermanecerLogado && !trial.cookies?.JSESSIONID) {
       throw new Error('Cookie TecPermanecerLogado ou JSESSIONID ausente na sincronização.');
     }
-    try {
-      const pastas = await tecFolders(trialClient);
-      log('SYNC', `Validação no TEC bem-sucedida (${pastas.length} pastas encontradas).`);
-    } catch (error) {
-      if (error instanceof AuthError || [401, 403].includes(error.status)) {
-        throw new Error('A sessão recebida não foi aceita pelo TEC. Faça login novamente no Chrome e use “Sincronizar agora” na extensão.');
-      }
-      logWarn('SYNC', `Aviso ao validar pastas no TEC durante sync (cookies serão salvos mesmo assim): ${error.message}`);
-    }
+    // Salva os cookies diretamente sem fazer requisição imediata ao TEC a partir do IP da VPS
+    // (evita disparar anti-bot/CAPTCHA no navegador do usuário logo após o login)
     session.cookies = { ...session.cookies, ...trial.cookies };
     session.meta = { via: 'chrome-extension-sync', at: new Date().toISOString() };
     session.save();
@@ -315,45 +310,72 @@ export function resolveGabaritoIndex(q, options = []) {
 }
 
 async function loadQuestion(cid, n) {
+  // 1. A rota /cadernos/:cid/questoes/:n já retorna enunciado, alternativas, banca, órgão, cargo, ano e tipoQuestao!
+  // Não fazemos chamadas paralelas extras para /questoes/:id ou /questoes/:id/detalhes para evitar rate-limit (HTTP 429) e WAF.
   const item = await tecQuestionFromNotebook(cid, n);
   if (!item) return null;
   const id = item.idQuestao ?? item.id ?? item.questaoId;
   if (!id) throw new Error('O TEC retornou uma questão sem ID.');
 
-  const [q, raw] = await Promise.all([
-    api.questao(id, { comentario: true }),
-    api.questaoBruta(id).catch(() => null),
-  ]);
+  const toText = htmlToText || compact;
+  const tipo = item.tipoQuestao || item.tipo;
+  const alternativas = Array.isArray(item.alternativas) && item.alternativas.length
+    ? item.alternativas.map(a => toText(a))
+    : tipo === 'CERTO_ERRADO' ? ['Certo', 'Errado'] : [];
 
-  const opcoes = q.alternativas?.length
-    ? q.alternativas
-    : q.tipo === 'CERTO_ERRADO' ? ['Certo', 'Errado'] : [];
+  const q = {
+    id,
+    tipo,
+    formato: item.formatoQuestao,
+    materia: { id: item.idMateria, nome: item.nomeMateria, url: item.materiaUrl },
+    assunto: { id: item.idAssunto, nome: item.nomeAssunto?.trim(), url: item.assuntoUrl },
+    banca: item.bancaSigla,
+    orgao: item.orgaoSigla,
+    orgaoNome: item.orgaoNome,
+    cargo: item.cargoSigla,
+    ano: item.concursoAno,
+    area: item.concursoArea,
+    anulada: !!item.anulada,
+    desatualizada: !!item.desatualizada,
+    enunciado: toText(item.enunciado || ''),
+    alternativas,
+    gabarito: null,
+    comentario: null,
+    url: `https://www.tecconcursos.com.br/questoes/${id}`,
+  };
 
-  // 1. Tenta gabarito estruturado da API (se exposto pelo TEC no raw ou no item)
-  const numeroRaw = raw?.numeroAlternativaCorreta ?? item.numeroAlternativaCorreta;
+  // 2. Se a questão já traz numeroAlternativaCorreta ou alternativaCorreta na resposta do caderno, usa direto (0 requisições extras!)
+  const numeroRaw = item.numeroAlternativaCorreta;
   const numero = typeof numeroRaw === 'number'
     ? numeroRaw
     : /^\d+$/.test(String(numeroRaw ?? '')) ? Number(numeroRaw) : NaN;
-  const letraRaw = String(raw?.alternativaCorreta ?? item.alternativaCorreta ?? '').trim().toUpperCase();
+  const letraRaw = String(item.alternativaCorreta ?? '').trim().toUpperCase();
 
-  if (Number.isInteger(numero) && numero > 0 && numero <= opcoes.length) {
-    q.gabarito = q.tipo === 'CERTO_ERRADO'
+  if (Number.isInteger(numero) && numero > 0 && numero <= alternativas.length) {
+    q.gabarito = tipo === 'CERTO_ERRADO'
       ? (numero === 1 ? 'Certo' : 'Errado')
       : String.fromCharCode(64 + numero);
-  } else if (/^[A-J]$/.test(letraRaw) && (letraRaw.charCodeAt(0) - 65 < opcoes.length || q.tipo === 'CERTO_ERRADO')) {
-    q.gabarito = q.tipo === 'CERTO_ERRADO'
+  } else if (/^[A-J]$/.test(letraRaw) && (letraRaw.charCodeAt(0) - 65 < alternativas.length || tipo === 'CERTO_ERRADO')) {
+    q.gabarito = tipo === 'CERTO_ERRADO'
       ? (letraRaw === 'C' || letraRaw === 'A' ? 'Certo' : 'Errado')
       : letraRaw;
-  } else if (q.tipo === 'CERTO_ERRADO' && /^(CERTO|ERRADO)$/.test(letraRaw)) {
+  } else if (tipo === 'CERTO_ERRADO' && /^(CERTO|ERRADO)$/.test(letraRaw)) {
     q.gabarito = letraRaw[0] + letraRaw.slice(1).toLowerCase();
   }
 
-  // 2. Se não houver gabarito estruturado em raw/item, preserva o gabarito extraído pelo tec-agent
-  // (que já analisa api.questao() e os comentários do professor)
-
-  // 3. Se ainda assim estiver sem gabarito, executa fallback avançado de extração pelo comentário
-  if (!q.gabarito && q.comentario) {
-    q.gabarito = extrairGabaritoComentario(q.comentario, q.tipo, opcoes);
+  // 3. Apenas se ainda não tiver gabarito, busca sequencialmente o comentário (1 única requisição extra)
+  if (!q.gabarito && item.possuiComentario !== false) {
+    const com = await api.comentario(id).catch(() => null);
+    const comTxt = com?.textoComentario ? toText(com.textoComentario) : null;
+    q.comentario = comTxt;
+    if (comTxt) {
+      if (extrairGabarito) {
+        q.gabarito = extrairGabarito(item, comTxt);
+      }
+      if (!q.gabarito) {
+        q.gabarito = extrairGabaritoComentario(comTxt, tipo, alternativas);
+      }
+    }
   }
 
   if (q.gabarito) {
@@ -467,6 +489,8 @@ async function nextIndex(cs, chatId, userId, mode, skipped = new Set()) {
   return available[0] ?? null;
 }
 
+const MAX_TENTATIVAS_POR_COMANDO = 3;
+
 async function showQuestion(chat, user, mode = 'next') {
   const cs = chatState(chat.id);
   if (!cs.cadernoId || !cs.total) throw new Error('Primeiro envie /caderno seguido do link direto do caderno.');
@@ -476,6 +500,12 @@ async function showQuestion(chat, user, mode = 'next') {
   let n, q, options, correctId;
 
   while ((n = await nextIndex(cs, chat.id, user.id, mode, ignoradasNestaBusca)) !== null) {
+    if (ignoradasNestaBusca.size >= MAX_TENTATIVAS_POR_COMANDO) {
+      logWarn('QUIZ', `Limite de ${MAX_TENTATIVAS_POR_COMANDO} tentativas por comando atingido para evitar rate-limit (HTTP 429) no TEC.`);
+      n = null;
+      break;
+    }
+
     q = await loadQuestion(cs.cadernoId, n);
     if (!q) {
       logError('QUIZ', `Não foi possível carregar a questão nº ${n} do caderno ${cs.cadernoId}`);
@@ -496,18 +526,18 @@ async function showQuestion(chat, user, mode = 'next') {
 
   if (n === null) {
     const respondidas = solvedSet(chat.id, user.id, cs.cadernoId).size;
-    const resumo = ignoradasNestaBusca.size ? ` ${ignoradasNestaBusca.size} questão(ões) sem gabarito disponível foram puladas nesta busca; elas serão verificadas novamente na próxima.` : '';
+    const resumo = ignoradasNestaBusca.size ? ` (${ignoradasNestaBusca.size} questão(ões) sem gabarito no comentário foram puladas; parando após ${MAX_TENTATIVAS_POR_COMANDO} tentativas para evitar bloqueio do TEC)` : '';
     log('QUIZ', `Nenhuma questão disponível para chat ${chat.id} (${respondidas}/${cs.total} respondidas, ${ignoradasNestaBusca.size} puladas)`);
     return tg('sendMessage', {
       chat_id: chat.id,
-      text: `Não há questões com gabarito disponíveis agora. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}`
+      text: `Não encontrei questão com gabarito nas primeiras tentativas agora. Você respondeu ${respondidas}/${cs.total} no Telegram.${resumo}`
     });
   }
 
   if (ignoradasNestaBusca.size) {
     await tg('sendMessage', {
       chat_id: chat.id,
-      text: `⏭️ ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca; serão reavaliadas depois.`
+      text: `⏭️ ${ignoradasNestaBusca.size} questão(ões) sem gabarito estruturado foram puladas nesta busca.`
     });
   }
 
@@ -560,17 +590,17 @@ async function handleMessage(m) {
 
   try {
     if (cmd === '/start' || cmd.startsWith('/start@')) {
-      return tg('sendMessage', {
+      return await tg('sendMessage', {
         chat_id: chat.id,
         text: 'Bot de questões TEC. Use /lista para navegar pelos cadernos ou /caderno LINK para abrir pelo link. /proxima, /aleatoria e /status controlam seu estudo. A sincronização de sessão é direta via extensão no Chrome.'
       });
     }
     if (cmd === '/id' || cmd.startsWith('/id@')) {
-      return tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
+      return await tg('sendMessage', { chat_id: chat.id, text: `Seu ID Telegram é ${user.id}.` });
     }
     if (cmd === '/login' || cmd.startsWith('/login@')) {
       log('CMD', `/login: Informando sincronização direta sem pareamento`);
-      return tg('sendMessage', {
+      return await tg('sendMessage', {
         chat_id: chat.id,
         text: 'A sincronização da extensão TEC agora é direta e automática! Não é necessário nenhum código de pareamento.\n\nBasta instalar a extensão no Chrome/Helium e fazer login no TEC Concursos (ou clicar em "Sincronizar agora" na extensão).'
       });
@@ -584,25 +614,25 @@ async function handleMessage(m) {
       Object.assign(chatState(chat.id), { cadernoId: id, total, link });
       save();
       log('CMD', `/caderno: Caderno ${id} salvo para o chat ${chat.id} com ${total} questões.`);
-      return tg('sendMessage', { chat_id: chat.id, text: `Caderno carregado (${total} questões). Use /proxima ou /aleatoria.` });
+      return await tg('sendMessage', { chat_id: chat.id, text: `Caderno carregado (${total} questões). Use /proxima ou /aleatoria.` });
     }
     if (cmd === '/lista' || cmd.startsWith('/lista@')) {
       log('CMD', `/lista: Abrindo navegação de pastas para o chat ${chat.id}`);
-      return browse(chat.id, null);
+      return await browse(chat.id, null);
     }
     if (cmd === '/proxima' || cmd.startsWith('/proxima@')) {
       log('CMD', `/proxima solicitado no chat ${chat.id}`);
-      return showQuestion(chat, user, 'next');
+      return await showQuestion(chat, user, 'next');
     }
     if (cmd === '/aleatoria' || cmd.startsWith('/aleatoria@')) {
       log('CMD', `/aleatoria solicitado no chat ${chat.id}`);
-      return showQuestion(chat, user, 'random');
+      return await showQuestion(chat, user, 'random');
     }
     if (cmd === '/status' || cmd.startsWith('/status@')) {
       const cs = chatState(chat.id);
       const done = cs.cadernoId ? solvedSet(chat.id, user.id, cs.cadernoId).size : 0;
       log('CMD', `/status solicitado no chat ${chat.id}: ${done}/${cs.total || 0}`);
-      return tg('sendMessage', {
+      return await tg('sendMessage', {
         chat_id: chat.id,
         text: cs.total ? `Caderno ${cs.cadernoId}: ${done}/${cs.total} questões respondidas por você aqui no Telegram.` : 'Nenhum caderno carregado neste chat.'
       });

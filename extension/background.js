@@ -1,9 +1,9 @@
 const API_BASE = 'https://blackgroup.com.br/tec-login';
 const TEC_DOMAIN = 'tecconcursos.com.br';
-const AUTH_COOKIE_NAMES = new Set(['TecPermanecerLogado', 'JSESSIONID', 'aws-waf-token']);
 let syncTimer;
 let syncRunning = false;
 let syncAgain = false;
+let lastRememberMeValue = '';
 
 async function currentCookieHeader() {
   const cookies = await chrome.cookies.getAll({ domain: TEC_DOMAIN });
@@ -46,14 +46,16 @@ async function syncAfterCookieChange() {
 
 function queueSync() {
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => void syncAfterCookieChange(), 900);
+  syncTimer = setTimeout(() => void syncAfterCookieChange(), 3000);
 }
 
-chrome.cookies.onChanged.addListener(({ cookie }) => {
+chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
+  if (removed) return;
   const domain = cookie.domain.replace(/^\./, '');
   if (!domain.endsWith('tecconcursos.com.br')) return;
-  if (!AUTH_COOKIE_NAMES.has(cookie.name)) return;
-  if (cookie.name === 'TecPermanecerLogado' && !cookie.value) return;
+  if (cookie.name !== 'TecPermanecerLogado' || !cookie.value) return;
+  if (cookie.value === lastRememberMeValue) return;
+  lastRememberMeValue = cookie.value;
   queueSync();
 });
 
