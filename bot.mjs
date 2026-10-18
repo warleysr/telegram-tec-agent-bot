@@ -51,10 +51,14 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const tecDir = process.env.TEC_AGENT_DIR || path.join(os.homedir(), '.tec-agent');
 process.env.TEC_AGENT_HOME ||= tecDir;
 
-let agentRoot = process.env.TEC_AGENT_ROOT || path.join(os.homedir(), 'tec-agent');
-if (!fs.existsSync(path.join(agentRoot, 'src/client.mjs')) && fs.existsSync('/opt/tec-agent/src/client.mjs')) {
-  agentRoot = '/opt/tec-agent';
-}
+const candidateRoots = [
+  process.env.TEC_AGENT_ROOT,
+  path.join(os.homedir(), 'tec-agent'),
+  '/opt/tec-agent',
+  path.join(os.homedir(), '.gemini/antigravity/scratch/tec-agent'),
+].filter(Boolean);
+
+let agentRoot = candidateRoots.find(p => fs.existsSync(path.join(p, 'src/client.mjs'))) || candidateRoots[0];
 
 let TecClient, Session, AuthError, TecApi, importCookies, htmlToText, extrairGabarito;
 let session, client, api;
@@ -100,6 +104,18 @@ async function tecFolders(tecClient = client) {
 async function tecQuestionFromNotebook(cadernoId, position) {
   const response = await client.get(`/cadernos/${cadernoId}/questoes/${position}`, { atualizarCronometro: false });
   return response.questao;
+}
+
+// Consulta desempenho da questão (estatísticas e alternativa correta oficial)
+async function tecPerformance(id) {
+  try {
+    if (api?.desempenho) return await api.desempenho(id);
+    if (client?.get) {
+      const res = await client.get(`/questoes/${id}/desempenho`);
+      return res?.desempenho ?? res;
+    }
+  } catch {}
+  return null;
 }
 
 function save() {
@@ -227,6 +243,28 @@ function cadernoId(input) {
   const short = u.pathname.match(/^\/(?:s|caderno)\/([^/]+)/);
   if (short) throw new Error('Links curtos (/s/ ou /caderno/) ainda não podem ser convertidos pela API do tec-agent. Envie o link direto /questoes/cadernos/ID.');
   throw new Error('Não encontrei o ID do caderno no link. Use /questoes/cadernos/ID.');
+}
+
+/** Extrai o gabarito objetivo a partir do retorno de /desempenho (número 1-based, objeto ou payload completo) */
+export function extrairGabaritoDesempenho(des, tipo, alternativas = []) {
+  if (!des) return null;
+  const num = Number.isInteger(des)
+    ? des
+    : Number.isInteger(des?.alternativaCorreta)
+    ? des.alternativaCorreta
+    : Number.isInteger(des?.desempenho?.alternativaCorreta)
+    ? des.desempenho.alternativaCorreta
+    : null;
+
+  if (!Number.isInteger(num) || num < 1) return null;
+
+  const isCertoErrado = tipo === 'CERTO_ERRADO' || (alternativas.length === 2 && /certo/i.test(alternativas[0]) && /errado/i.test(alternativas[1]));
+  if (isCertoErrado) {
+    if (Array.isArray(alternativas) && alternativas[num - 1]) return alternativas[num - 1];
+    return num === 1 ? 'Certo' : num === 2 ? 'Errado' : String.fromCharCode(64 + num);
+  }
+
+  return String.fromCharCode(64 + num);
 }
 
 /** Extração avançada de gabarito a partir do comentário do professor quando a API não retorna estruturado */
@@ -363,9 +401,19 @@ async function loadQuestion(cid, n) {
     q.gabarito = letraRaw[0] + letraRaw.slice(1).toLowerCase();
   }
 
-  // 3. Apenas se ainda não tiver gabarito, busca sequencialmente o comentário (1 única requisição extra)
+  // 3. Se ainda não tiver gabarito, consulta /desempenho para obter a alternativa correta oficial de forma objetiva
+  if (!q.gabarito) {
+    const des = await tecPerformance(id);
+    if (des) {
+      q.gabarito = extrairGabaritoDesempenho(des, tipo, alternativas);
+      if (des.dificuldade) q.dificuldade = des.dificuldade;
+      if (des.desempenhoGeral) q.desempenho = des.desempenhoGeral;
+    }
+  }
+
+  // 4. Apenas se ainda não tiver gabarito, busca sequencialmente o comentário (fallback)
   if (!q.gabarito && item.possuiComentario !== false) {
-    const com = await api.comentario(id).catch(() => null);
+    const com = await api?.comentario ? await api.comentario(id).catch(() => null) : null;
     const comTxt = com?.textoComentario ? toText(com.textoComentario) : null;
     q.comentario = comTxt;
     if (comTxt) {
@@ -546,6 +594,7 @@ async function showQuestion(chat, user, mode = 'next') {
     [q.orgao || q.orgaoNome, q.ano].filter(Boolean).join(' '),
     q.cargo,
     q.prova,
+    q.dificuldade ? `Dificuldade: ${q.dificuldade}` : null,
     q.numero ? `Questão ${q.numero}` : null,
   ].filter(Boolean).join(' - ') || `Questão TEC #${q.id}`;
 
